@@ -213,7 +213,7 @@ class NNUELightningModule(pl.LightningModule):
         self._step_start_time = time.time()
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Single training step with gradient accumulation."""
+        """Single training step. Gradient accumulation handled by PL via accumulate_grad_batches."""
         features = batch["features"]
         wdl_target = batch["wdl"]
         eval_target = batch["eval"]
@@ -222,7 +222,6 @@ class NNUELightningModule(pl.LightningModule):
         eval_pred = self.model(features)
         
         # WDL logits from eval (simplified - in practice use separate head)
-        # For now, convert eval to WDL probabilities using sigmoid scaling
         wdl_logits = self._eval_to_wdl_logits(eval_pred)
         
         # Compute lambda for this step
@@ -235,60 +234,42 @@ class NNUELightningModule(pl.LightningModule):
         # Combined loss
         loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         
-        # Scale for gradient accumulation
-        loss = loss / self.accum_steps
-        
-        # Manual backward for accumulation
-        self.manual_backward(loss)
-        
-        # Log losses
-        if batch_idx % self.accum_steps == 0:
-            self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True)
-            self.log("train/loss_eval", loss_eval.detach(), prog_bar=True)
-            self.log("train/loss_total", loss.detach() * self.accum_steps, prog_bar=True)
-            self.log("train/lambda", lambda_val, prog_bar=True)
+        # Log losses (only on accumulation boundaries to reduce noise)
+        if (batch_idx + 1) % self.accum_steps == 0:
+            self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True, sync_dist=True)
+            self.log("train/loss_eval", loss_eval.detach(), prog_bar=True, sync_dist=True)
+            self.log("train/loss_total", loss.detach(), prog_bar=True, sync_dist=True)
+            self.log("train/lambda", lambda_val, prog_bar=True, sync_dist=True)
             
-            self.training_state.train_losses.append((loss.detach() * self.accum_steps).item())
+            self.training_state.train_losses.append(loss.detach().item())
             self.training_state.lambda_history.append(lambda_val)
         
         return loss
 
     def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int):
-        """Handle gradient accumulation step."""
-        if (batch_idx + 1) % self.accum_steps == 0:
-            # Gradient clipping
-            if self.config.get("training", {}).get("gradient_clip_val", 1.0) > 0:
-                self.clip_gradients(
-                    self.optimizers(),
-                    gradient_clip_val=self.config["training"]["gradient_clip_val"],
-                    gradient_clip_algorithm=self.config["training"].get("gradient_clip_algorithm", "norm"),
-                )
+        """Handle end of accumulation step - update EMA, checkpoint, time check."""
+        # Only run on accumulation boundaries
+        if (batch_idx + 1) % self.accum_steps != 0:
+            return
             
-            # Optimizer step
-            self.optimizers().step()
-            self.optimizers().zero_grad()
-            
-            # Update EMA
-            if self.ema_model is not None:
-                ema_cfg = self.config.get("advanced", {}).get("ema", {})
-                if ema_cfg.get("enabled", True):
-                    update_every = ema_cfg.get("update_every", 1)
-                    if self.training_state.step % update_every == 0:
-                        self.model.update_ema()
-            
-            # Update training state
-            self.training_state.step += 1
-            self.training_state.samples_seen += self.batch_size
-            
-            # LR scheduling (handled by scheduler)
-            # Lambda scheduling (handled above)
-            
-            # Checkpointing
-            self._maybe_checkpoint()
-            
-            # Time budget check
-            if self._check_time_budget():
-                self.trainer.should_stop = True
+        # Update EMA
+        if self.ema_model is not None:
+            ema_cfg = self.config.get("advanced", {}).get("ema", {})
+            if ema_cfg.get("enabled", True):
+                update_every = ema_cfg.get("update_every", 1)
+                if self.training_state.step % update_every == 0:
+                    self.model.update_ema()
+        
+        # Update training state
+        self.training_state.step += 1
+        self.training_state.samples_seen += self.batch_size
+        
+        # Checkpointing
+        self._maybe_checkpoint()
+        
+        # Time budget check
+        if self._check_time_budget():
+            self.trainer.should_stop = True
 
     def _eval_to_wdl_logits(self, eval_cp: torch.Tensor) -> torch.Tensor:
         """Convert centipawn evaluation to WDL logits."""
@@ -481,23 +462,17 @@ class NNUELightningModule(pl.LightningModule):
 
 
 class TimeLimitCallback(Callback):
-    """Callback to enforce time limit and periodic checkpointing."""
+    """Callback to enforce time limit."""
     
-    def __init__(self, max_hours: float = 9.5, checkpoint_interval_min: int = 10):
+    def __init__(self, max_hours: float = 9.5):
         self.max_seconds = max_hours * 3600
-        self.checkpoint_interval = checkpoint_interval_min * 60
         self.start_time = time.time()
-        self.last_checkpoint = time.time()
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         elapsed = time.time() - self.start_time
         if elapsed >= self.max_seconds:
             print(f"Time budget ({self.max_seconds/3600:.1f}h) exceeded. Stopping...")
             trainer.should_stop = True
-        
-        if elapsed - self.last_checkpoint >= self.checkpoint_interval:
-            pl_module._save_checkpoint()
-            self.last_checkpoint = time.time()
 
 
 def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager, hf_uploader: HFUploader) -> pl.Trainer:
@@ -505,12 +480,12 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     hw_cfg = config.get("hardware", {})
     time_cfg = config.get("time_budget", {})
     log_cfg = config.get("logging", {})
+    adv_cfg = config.get("advanced", {})
     
-    # Callbacks
+    # Callbacks - TimeLimitCallback handles time budget; checkpointing done by module
     callbacks = [
         TimeLimitCallback(
             max_hours=time_cfg.get("hours", 9.5),
-            checkpoint_interval_min=time_cfg.get("checkpoint_interval_min", 10),
         ),
     ]
     
@@ -527,6 +502,15 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     # Precision
     precision = "16-mixed" if hw_cfg.get("fp16", True) else "32-true"
     
+    # Validation interval: val_check_interval can be int (epochs) or float (fraction of epoch)
+    val_check_interval = adv_cfg.get("validation", {}).get("val_check_interval", 0.05)
+    if isinstance(val_check_interval, float):
+        check_val_every_n_epoch = 1
+        limit_val_batches = val_check_interval
+    else:
+        check_val_every_n_epoch = val_check_interval
+        limit_val_batches = 1.0
+    
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=hw_cfg.get("gpus", 2),
@@ -536,20 +520,18 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
         max_steps=config.get("training", {}).get("lr_schedule", {}).get("total_steps", 5108000),
         gradient_clip_val=config.get("training", {}).get("gradient_clip_val", 1.0),
         gradient_clip_algorithm=config.get("training", {}).get("gradient_clip_algorithm", "norm"),
-        accumulate_grad_batches=config.get("advanced", {}).get("gradient_accumulation", 8),
+        accumulate_grad_batches=adv_cfg.get("gradient_accumulation", 8),
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=log_cfg.get("log_every_n_steps", 100),
-        enable_checkpointing=False,  # We handle checkpointing manually
+        enable_checkpointing=False,  # We handle checkpointing manually in module
         enable_progress_bar=True,
         enable_model_summary=True,
         deterministic=False,
         benchmark=hw_cfg.get("benchmark_cudnn", True),
         num_sanity_val_steps=0,
-        check_val_every_n_epoch=config.get("advanced", {}).get("validation", {}).get("val_check_interval", 0) 
-                                if isinstance(config.get("advanced", {}).get("validation", {}).get("val_check_interval", 0), int) 
-                                else 1,
-        limit_val_batches=config.get("advanced", {}).get("validation", {}).get("val_check_interval", 0.05),
+        check_val_every_n_epoch=check_val_every_n_epoch,
+        limit_val_batches=limit_val_batches,
     )
     
     return trainer

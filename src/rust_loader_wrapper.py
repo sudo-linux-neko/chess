@@ -137,34 +137,6 @@ class RustQuantizedNNUE:
         return self._engine.forward(features)
 
 
-class RustStreamingBinpackDataset:
-    """Streaming dataset using Rust loader."""
-    
-    def __init__(
-        self,
-        data_dir: str,
-        max_files: int = 5,
-        shuffle_buffer_size: int = 5000000,
-        seed: int = 42,
-    ):
-        loader = get_rust_loader()
-        if loader is None:
-            raise RuntimeError("Rust loader not available")
-        
-        self._dataset = loader.StreamingBinpackDataset(
-            data_dir, max_files, shuffle_buffer_size, seed
-        )
-    
-    def __iter__(self):
-        return iter(self._dataset)
-    
-    def get_state(self) -> tuple:
-        return self._dataset.get_state()
-    
-    def set_state(self, state: tuple):
-        self._dataset.set_state(state)
-
-
 def is_rust_available() -> bool:
     """Check if Rust loader is available."""
     return get_rust_loader() is not None
@@ -247,8 +219,8 @@ def create_streaming_dataset(
 ):
     """Factory function for streaming dataset."""
     if prefer_rust and is_rust_available():
-        return RustStreamingBinpackDataset(data_dir, max_files, shuffle_buffer_size, seed)
-    else:
-        # Fall back to Python implementation in data.py
-        from src.data import StreamingBinpackDataset
-        return StreamingBinpackDataset(data_dir, max_files, shuffle_buffer_size, seed)
+        # Rust streaming dataset not yet implemented, fall back to Python
+        pass
+    # Fall back to Python implementation in data.py
+    from src.data import StreamingBinpackDataset
+    return StreamingBinpackDataset(data_dir, max_files, shuffle_buffer_size, seed)
