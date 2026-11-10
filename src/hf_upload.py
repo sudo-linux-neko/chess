@@ -67,7 +67,9 @@ class HFUploader:
         self.config = config
         hf_cfg = config.get("hf", {})
 
+        # If no repo_id provided, auto-generate as {username}/chess-nnue
         self.repo_id = hf_cfg.get("repo_id", "")
+        self.repo_name = hf_cfg.get("repo_name", "chess-nnue")
         self.token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
         self.upload_every_n = hf_cfg.get("upload_every_n", 3)
         self.max_retries = hf_cfg.get("max_retries", 5)
@@ -100,7 +102,25 @@ class HFUploader:
             logger.warning("huggingface_hub not available, uploads disabled")
 
     def _ensure_repo_exists(self, api):
-        """Create repo if it doesn't exist."""
+        """Create repo if it doesn't exist. Auto-generates repo_id as {username}/chess-nnue if not provided."""
+        # Auto-generate repo_id if not provided
+        if not self.repo_id:
+            if not self.token:
+                logger.error("No HF token provided - cannot auto-generate repo_id")
+                return False
+            try:
+                # Get current user info
+                user_info = api.whoami(token=self.token)
+                username = user_info.get("name") or user_info.get("user", {}).get("name")
+                if not username:
+                    logger.error("Could not determine HF username from token")
+                    return False
+                self.repo_id = f"{username}/{self.repo_name}"
+                logger.info(f"Auto-generated repo_id: {self.repo_id}")
+            except Exception as e:
+                logger.error(f"Failed to get HF username: {e}")
+                return False
+        
         if not self.repo_id:
             return False
         

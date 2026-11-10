@@ -160,7 +160,8 @@ checkpoint:
   atomic_writes: true
 
 hf:
-  repo_id: "sudo-linux-neko/nnue-checkpoints"
+  # repo_id: "username/repo-name"  # Optional: if not set, auto-generates as {your-username}/chess-nnue
+  repo_name: "chess-nnue"          # Repo name (used if repo_id not set)
   upload_every_n: 3
   max_retries: 5
   backoff_base: 30
