@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-Main entry point for NNUE Trainer - Optimized Version.
+Main entry point for NNUE Trainer - Optimized for Stockfish on Kaggle.
 
 Usage:
     python run.py                    # Full training on Kaggle (optimized)
@@ -13,6 +13,8 @@ Usage:
     python run.py --export-only      # Export latest checkpoint to .nnue
     python run.py --verify-export    # Verify exported net matches PyTorch
     python run.py --benchmark        # Benchmark throughput (no training)
+
+Rust acceleration (experimental): src/rust_loader/ - requires maturin
 """
 
 import os
@@ -56,20 +58,17 @@ def load_config(config_path: str, overrides: dict = None) -> dict:
 
 def setup_environment(config: dict):
     """Set up environment variables and directories."""
-    # Create directories
     for key in ["data", "checkpoint", "export", "logging"]:
         cfg = config.get(key, {})
         dir_path = cfg.get("dir") or cfg.get("data_dir")
         if dir_path:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
 
-    # PyTorch settings for performance
     torch.set_float32_matmul_precision('high')
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
-    # Set seed for reproducibility
     seed = config.get("seed", 42)
     torch.manual_seed(seed)
     import numpy as np
@@ -105,11 +104,9 @@ def run_benchmark(config: dict) -> int:
     print("BENCHMARK: Data Loading + Model Throughput")
     print("=" * 60)
 
-    # Compile loader
     if not compile_cpp_loader():
         print("WARNING: C++ loader compilation failed")
 
-    # Create dummy data if needed
     data_dir = Path(config["data"]["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
     binpack_files = list(data_dir.glob("*.binpack"))
@@ -118,11 +115,9 @@ def run_benchmark(config: dict) -> int:
         from src.data import _create_dummy_binpack
         _create_dummy_binpack(data_dir / "benchmark.binpack", 100000)
 
-    # Create model
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
 
-    # Test compilation
     hw_cfg = config.get("hardware", {})
     if hw_cfg.get("compile_model", False):
         try:
@@ -135,10 +130,8 @@ def run_benchmark(config: dict) -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    # Create dataloader
     loader = create_dataloader(config, is_train=True)
     
-    # Warmup
     print("\nWarming up...")
     for i, batch in enumerate(loader):
         if i >= 5:
@@ -147,7 +140,6 @@ def run_benchmark(config: dict) -> int:
         with torch.no_grad():
             _ = model(features)
 
-    # Benchmark
     print("Benchmarking...")
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     start = time.time()
@@ -162,7 +154,7 @@ def run_benchmark(config: dict) -> int:
         
         total_positions += batch_size
         
-        if i >= 20:  # Benchmark 20 batches
+        if i >= 20:
             break
 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
@@ -184,7 +176,6 @@ def run_smoke_test(config: dict) -> int:
     print("SMOKE TEST: Verifying full pipeline (2 minutes)")
     print("=" * 60)
 
-    # Override config for smoke test
     smoke_cfg = config.get("smoke_test", {})
     config["smoke_test"]["enabled"] = True
     config["training"]["batch_size"] = smoke_cfg.get("batch_size", 512)
@@ -194,40 +185,30 @@ def run_smoke_test(config: dict) -> int:
     config["hardware"]["num_workers"] = smoke_cfg.get("num_workers", 0)
     config["hardware"]["compile_model"] = False
 
-    # Compile C++ loader
-    print("\n1. Compiling C++ loader...")
     if not compile_cpp_loader():
-        print("WARNING: C++ loader compilation failed, using Python fallback")
+        print("WARNING: C++ loader compilation failed")
 
-    # Create dummy data
     print("\n2. Creating dummy data...")
     data_dir = Path(config["data"]["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
     _create_dummy_binpack(data_dir / "smoke_test.binpack", 1000)
 
-    # Initialize components
     print("\n3. Initializing training components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
 
-    # Create model
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
 
-    # Create Lightning module
     pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader)
-
-    # Create trainer
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
 
-    # Train
     print("\n4. Running training...")
     start = time.time()
     trainer.fit(pl_module)
     elapsed = time.time() - start
     print(f"Training completed in {elapsed:.1f}s")
 
-    # Test checkpoint save/load
     print("\n5. Testing checkpoint save/load...")
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
@@ -243,14 +224,12 @@ def run_smoke_test(config: dict) -> int:
         time.sleep(0.5)
         hf_uploader.shutdown(wait=True)
 
-    # Test export
     print("\n6. Testing export...")
     exporter = create_exporter(config)
     test_data = torch.randn(10, config["model"]["input_dim"])
     nnue_path = exporter.export(pl_module.model, test_data)
     print(f"Exported: {nnue_path}")
 
-    # Test verification
     print("\n7. Testing verification...")
     try:
         result = exporter.verify_export(pl_module.model, nnue_path, test_data)
@@ -265,11 +244,11 @@ def run_smoke_test(config: dict) -> int:
 
 
 def _create_dummy_binpack(path: Path, num_positions: int):
-    """Create a minimal dummy binpack file for testing."""
+    import struct
     with open(path, 'wb') as f:
-        f.write(b"BINP")  # Magic
-        f.write(struct.pack("<I", 1))  # Version
-        f.write(struct.pack("<Q", num_positions))  # Num positions
+        f.write(b"BINP")
+        f.write(struct.pack("<I", 1))
+        f.write(struct.pack("<Q", num_positions))
 
         for _ in range(num_positions):
             num_features = 32
@@ -297,13 +276,11 @@ def run_training(config: dict) -> int:
     print(f"Loss: WDL({config['training']['wdl_lambda']}) + Eval({1-config['training']['wdl_lambda']})")
     print(f"LR Schedule: Cosine Warm Restarts (T0={config['training'].get('t0', 50000)})")
 
-    # Compile C++ loader
     print("\n1. Compiling C++ binpack loader...")
     if not compile_cpp_loader():
         print("ERROR: C++ loader compilation failed")
         return 1
 
-    # Download data
     print("\n2. Preparing training data...")
     data_dir = Path(config["data"]["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -317,23 +294,18 @@ def run_training(config: dict) -> int:
     total_gb = sum(f.stat().st_size for f in binpack_files) / 1024**3
     print(f"Total data: {total_gb:.2f} GB")
 
-    # Initialize components
     print("\n3. Initializing components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
 
-    # Find resumable checkpoint
     print("\n4. Checking for resumable checkpoint...")
     resume_ckpt = find_resumable_checkpoint(config, hf_uploader)
 
-    # Create model
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
 
-    # Create Lightning module
     pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader)
 
-    # Load checkpoint if found
     if resume_ckpt:
         print(f"Resuming from: {resume_ckpt}")
         checkpoint_manager.load_checkpoint(
@@ -344,10 +316,8 @@ def run_training(config: dict) -> int:
             scaler=None,
         )
 
-    # Create trainer
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
 
-    # Train
     print("\n5. Starting training...")
     print("Press Ctrl+C for graceful shutdown (saves checkpoint)")
     start = time.time()
@@ -367,7 +337,6 @@ def run_training(config: dict) -> int:
     print(f"Total steps: {pl_module.training_state.step}")
     print(f"Final loss: {pl_module.train_losses[-1] if pl_module.train_losses else 'N/A'}")
 
-    # Final checkpoint
     print("\n6. Saving final checkpoint...")
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
@@ -381,18 +350,15 @@ def run_training(config: dict) -> int:
     if ckpt_path:
         hf_uploader.queue_upload(ckpt_path)
 
-    # Export final model
     print("\n7. Exporting final model...")
     exporter = create_exporter(config)
 
-    # Get test data for verification
     test_loader = create_dataloader(config, is_train=False)
     test_batch = next(iter(test_loader))
     test_data = test_batch["features"][:100]
 
     nnue_path = exporter.export(pl_module.model, test_data)
 
-    # Verify export
     if config.get("export", {}).get("verify", True):
         print("\n8. Verifying export...")
         try:
@@ -402,10 +368,7 @@ def run_training(config: dict) -> int:
         except Exception as e:
             print(f"Verification error: {e}")
 
-    # Upload export
     hf_uploader.queue_export_upload(nnue_path)
-
-    # Shutdown
     hf_uploader.shutdown(wait=True)
 
     print("\n" + "=" * 60)
@@ -419,7 +382,6 @@ def run_training(config: dict) -> int:
 
 
 def run_export_only(config: dict) -> int:
-    """Export latest checkpoint to .nnue."""
     print("Exporting latest checkpoint...")
 
     checkpoint_manager = CheckpointManager(config)
@@ -429,11 +391,9 @@ def run_export_only(config: dict) -> int:
         print("No checkpoint found")
         return 1
 
-    # Load model
     model = create_model(config)
     checkpoint_manager.load_checkpoint(latest_ckpt, model=model)
 
-    # Export
     exporter = create_exporter(config)
     test_loader = create_dataloader(config, is_train=False)
     test_batch = next(iter(test_loader))
@@ -441,7 +401,6 @@ def run_export_only(config: dict) -> int:
 
     nnue_path = exporter.export(model, test_data)
 
-    # Verify
     if config.get("export", {}).get("verify", True):
         result = exporter.verify_export(model, nnue_path, test_data)
         if not result["verified"]:
@@ -453,7 +412,6 @@ def run_export_only(config: dict) -> int:
 
 
 def run_verify_export(config: dict) -> int:
-    """Verify exported net against PyTorch model."""
     print("Verifying exported net...")
 
     checkpoint_manager = CheckpointManager(config)
@@ -463,11 +421,9 @@ def run_verify_export(config: dict) -> int:
         print("No checkpoint found")
         return 1
 
-    # Load model
     model = create_model(config)
     checkpoint_manager.load_checkpoint(latest_ckpt, model=model)
 
-    # Find exported net
     export_dir = Path(config["export"]["dir"])
     nnue_files = list(export_dir.glob("nn-*.nnue"))
     if not nnue_files:
@@ -477,7 +433,6 @@ def run_verify_export(config: dict) -> int:
     nnue_path = max(nnue_files, key=lambda f: f.stat().st_mtime)
     print(f"Verifying: {nnue_path}")
 
-    # Test data
     test_loader = create_dataloader(config, is_train=False)
     test_batch = next(iter(test_loader))
     test_data = test_batch["features"][:config["export"]["verify_samples"]]
@@ -504,7 +459,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Load config
     overrides = {}
     if args.gpus is not None:
         overrides["hardware.gpus"] = args.gpus
@@ -518,7 +472,6 @@ def main():
     config = load_config(args.config, overrides)
     config["config_path"] = args.config
 
-    # Apply smoke test overrides
     if args.smoke_test:
         smoke_cfg = config.get("smoke_test", {})
         for key, value in smoke_cfg.items():
@@ -532,10 +485,8 @@ def main():
         config["smoke_test"]["enabled"] = True
         config["hardware"]["compile_model"] = False
 
-    # Setup
     setup_environment(config)
 
-    # Run requested command
     if args.compile_only:
         return compile_only(config)
     elif args.download_data:
@@ -553,5 +504,5 @@ def main():
 
 
 if __name__ == "__main__":
-    import struct  # For dummy binpack creation
+    import struct
     sys.exit(main())

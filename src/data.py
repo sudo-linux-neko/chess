@@ -5,12 +5,15 @@
 Binpack Data Loader for NNUE Training - Optimized for Maximum Throughput.
 
 Features:
-- Fast C++ binpack loader (compiled at runtime via pybind11)
+- Fast C++ binpack loader (compiled at runtime via pybind11) - PRIMARY
+- Python fallback - for testing without compilation
 - Multi-file streaming with round-robin for variety
 - Large shuffle buffer with reservoir sampling
 - Prefetching and persistent workers
 - Exact resume position tracking
 - Automatic data download with resume + checksum
+
+Rust loader (experimental): src/rust_loader/ - requires maturin, not yet stable
 """
 
 import os
@@ -31,7 +34,7 @@ import torch.multiprocessing as mp
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
 import numpy as np
 
-# Try to import the compiled C++ loader
+# Try to import the compiled C++ loader (PRIMARY)
 try:
     from cpp_loader import BinpackDataset as CppBinpackDataset
     CPP_LOADER_AVAILABLE = True
@@ -43,7 +46,7 @@ except ImportError:
 @dataclass
 class BinpackPosition:
     """Single position from binpack file."""
-    features: np.ndarray      # Dense features (81920,) float32 - one-hot per active index
+    features: np.ndarray      # Dense features (81920,) float32
     wdl: np.ndarray           # [W, D, L] probabilities
     eval: float               # Centipawn evaluation
     game_result: int          # 1=white win, 0=draw, -1=black win
@@ -53,12 +56,7 @@ class StreamingBinpackDataset(IterableDataset):
     """
     Streaming dataset for binpack files with optimized throughput.
     
-    Key optimizations:
-    - Round-robin across multiple files for better generalization
-    - Large in-memory shuffle buffer with reservoir sampling
-    - Per-worker file sharding for parallel loading
-    - Exact position tracking for resume
-    - Zero-copy tensor conversion where possible
+    Uses C++ loader (primary) or Python fallback.
     """
 
     def __init__(
@@ -98,17 +96,14 @@ class StreamingBinpackDataset(IterableDataset):
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
-        # Each worker gets a different seed
         worker_seed = self.seed + worker_id * 10000
         rng = random.Random(worker_seed)
 
-        # Distribute files across workers
         files_per_worker = max(1, len(self.files) // num_workers)
         start_idx = worker_id * files_per_worker
         end_idx = start_idx + files_per_worker if worker_id < num_workers - 1 else len(self.files)
         worker_files = self.files[start_idx:end_idx]
 
-        # Handle resume: only worker 0 handles the resume position
         if self.current_file_idx > 0 or self.current_position > 0:
             if worker_id == 0:
                 worker_files = self.files[self.current_file_idx:]
@@ -124,17 +119,12 @@ class StreamingBinpackDataset(IterableDataset):
                 yield from self._iterate_python_fallback(filepath, global_file_idx, rng)
 
     def _iterate_cpp_loader(self, filepath: Path, file_idx: int, rng: random.Random):
-        """Iterate using fast C++ loader with shuffle buffer."""
         dataset = CppBinpackDataset(str(filepath))
         num_positions = len(dataset)
 
-        # Determine start position for this file
         start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
 
-        # Create indices for this file
         indices = list(range(start_pos, num_positions))
-        
-        # Process in chunks for memory efficiency
         chunk_size = min(self.shuffle_buffer_size, len(indices))
         
         for chunk_start in range(0, len(indices), chunk_size):
@@ -146,14 +136,11 @@ class StreamingBinpackDataset(IterableDataset):
                 pos_data = dataset[idx]
                 yield self._pos_to_tensors(pos_data)
 
-                # Update resume position
                 with self._position_lock:
                     self.current_position = idx + 1
                     self.current_file_idx = file_idx
 
     def _iterate_python_fallback(self, filepath: Path, file_idx: int, rng: random.Random):
-        """Pure Python fallback for testing without C++ loader."""
-        # Minimal binpack parser for smoke test
         with open(filepath, 'rb') as f:
             magic = f.read(4)
             if magic != b"BINP":
@@ -163,7 +150,6 @@ class StreamingBinpackDataset(IterableDataset):
 
             start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
             
-            # Skip to start position
             for _ in range(start_pos):
                 self._skip_position(f)
 
@@ -174,8 +160,6 @@ class StreamingBinpackDataset(IterableDataset):
                 chunk = indices[chunk_start:min(chunk_start + chunk_size, len(indices))]
                 rng.shuffle(chunk)
                 
-                # For fallback, we need to seek each position (slow)
-                # This is only for smoke test anyway
                 for idx in chunk:
                     f.seek(self._get_position_offset(filepath, idx))
                     pos_data = self._read_position(f)
@@ -186,17 +170,13 @@ class StreamingBinpackDataset(IterableDataset):
                         self.current_file_idx = file_idx
 
     def _skip_position(self, f):
-        """Skip a single position in the file."""
         num_features = struct.unpack("<H", f.read(2))[0]
-        f.seek(num_features * 6 + 13, 1)  # features(2) + weights(4) + wdl(12) + eval(4) + result(1)
+        f.seek(num_features * 6 + 13, 1)
 
     def _get_position_offset(self, filepath: Path, idx: int) -> int:
-        """Get file offset for a position (builds index if needed)."""
-        # Simplified - in production use C++ loader
-        return 20 + idx * 100  # Rough estimate
+        return 20 + idx * 100
 
     def _read_position(self, f) -> tuple:
-        """Read a single position from file."""
         num_features = struct.unpack("<H", f.read(2))[0]
         features = struct.unpack(f"<{num_features}H", f.read(num_features * 2))
         weights = struct.unpack(f"<{num_features}f", f.read(num_features * 4))
@@ -206,28 +186,22 @@ class StreamingBinpackDataset(IterableDataset):
         return (np.array(features), np.array(weights), np.array(wdl), eval_cp, game_result)
 
     def _pos_to_tensors(self, pos_data: Any) -> Dict[str, torch.Tensor]:
-        """Convert C++ loader output to PyTorch tensors."""
         features, weights, wdl, eval_cp, game_result = pos_data
 
-        # Convert sparse indices to dense one-hot (81920,)
-        # The C++ loader returns (feature_indices, weights)
-        # We need to convert to dense for the model
         feature_indices = features.astype(np.int32)
         feature_weights = weights.astype(np.float32)
         
-        # Create dense features vector
         dense_features = np.zeros(81920, dtype=np.float32)
         dense_features[feature_indices] = feature_weights
 
         return {
-            "features": torch.from_numpy(dense_features),      # (81920,) float32
-            "wdl": torch.from_numpy(wdl).float(),              # (3,) float32
-            "eval": torch.tensor(eval_cp, dtype=torch.float32), # scalar
+            "features": torch.from_numpy(dense_features),
+            "wdl": torch.from_numpy(wdl).float(),
+            "eval": torch.tensor(eval_cp, dtype=torch.float32),
             "game_result": torch.tensor(game_result, dtype=torch.long),
         }
 
     def get_state(self) -> Dict[str, Any]:
-        """Get current dataset state for checkpointing."""
         with self._position_lock:
             return {
                 "current_file_idx": self.current_file_idx,
@@ -236,7 +210,6 @@ class StreamingBinpackDataset(IterableDataset):
             }
 
     def set_state(self, state: Dict[str, Any]):
-        """Restore dataset state from checkpoint."""
         self.current_file_idx = state.get("current_file_idx", 0)
         self.current_position = state.get("current_position", 0)
         self.seed = state.get("seed", self.seed)
@@ -247,10 +220,7 @@ class StreamingBinpackDataset(IterableDataset):
 # Data Download with Resume & Checksum
 # ============================================================
 
-CHECKSUMS = {
-    # Known checksums for common training data files
-    # These would be populated from the data source
-}
+CHECKSUMS = {}
 
 def download_file(
     url: str,
@@ -259,22 +229,15 @@ def download_file(
     max_size_gb: Optional[float] = None,
     chunk_size: int = 1024 * 1024,
 ) -> bool:
-    """
-    Download file with resume support, checksum verification, and size limit.
-    
-    Returns True on success, False on failure.
-    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_dest = dest.with_suffix(dest.suffix + ".tmp")
 
-    # Check existing file
     resume_header = {}
     existing_size = 0
     if tmp_dest.exists():
         existing_size = tmp_dest.stat().st_size
         resume_header["Range"] = f"bytes={existing_size}-"
     elif dest.exists():
-        # File already complete
         if expected_sha256:
             if verify_checksum(dest, expected_sha256):
                 return True
@@ -288,7 +251,6 @@ def download_file(
         
         total_size = existing_size + int(response.headers.get("Content-Length", 0))
         
-        # Check size limit
         if max_size_gb and total_size > max_size_gb * 1024**3:
             print(f"File too large: {total_size / 1024**3:.1f}GB > {max_size_gb}GB")
             return False
@@ -302,19 +264,15 @@ def download_file(
                     break
                 f.write(chunk)
                 downloaded += len(chunk)
-                
-                # Progress
                 if downloaded % (100 * 1024 * 1024) == 0:
                     print(f"  Downloaded {downloaded / 1024**2:.0f}MB...")
 
-        # Verify checksum
         if expected_sha256:
             if not verify_checksum(tmp_dest, expected_sha256):
                 print(f"Checksum mismatch for {dest.name}")
                 tmp_dest.unlink(missing_ok=True)
                 return False
 
-        # Atomic rename
         tmp_dest.rename(dest)
         print(f"Downloaded: {dest.name} ({total_size / 1024**3:.2f}GB)")
         return True
@@ -326,7 +284,6 @@ def download_file(
 
 
 def verify_checksum(filepath: Path, expected_sha256: str) -> bool:
-    """Verify SHA256 checksum of file."""
     sha256 = hashlib.sha256()
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(8192), b''):
@@ -339,10 +296,6 @@ def download_training_data(
     config: dict,
     max_files: int = 10,
 ) -> List[Path]:
-    """
-    Download training data from configured sources.
-    Tries sources in order until enough data is downloaded.
-    """
     data_cfg = config.get("data", {})
     sources = data_cfg.get("sources", [])
     max_data_gb = data_cfg.get("max_data_gb", 18)
@@ -366,7 +319,6 @@ def download_training_data(
 
 
 def _download_from_hf(source: dict, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
-    """Download from Hugging Face Hub."""
     try:
         from huggingface_hub import list_repo_files, hf_hub_download
     except ImportError:
@@ -413,18 +365,11 @@ def _download_from_hf(source: dict, data_dir: Path, max_data_gb: float, max_file
 
 
 def _download_from_http(source: dict, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
-    """Download from HTTP server (Stockfish training data mirrors)."""
-    base_url = source.get("base_url", "https://trainingdata.stockfishchess.org/")
-    pattern = source.get("pattern", "*.binpack")
-    
-    # For HTTP, we'd need a file listing - simplified here
-    # In practice, you'd scrape the directory or use a manifest
-    print(f"HTTP download from {base_url} not fully implemented")
+    print(f"HTTP download from {source.get('base_url')} not fully implemented")
     return []
 
 
 def _copy_from_local(source: dict, data_dir: Path, max_files: int) -> List[Path]:
-    """Copy from local path (e.g., Kaggle dataset mount)."""
     local_path = Path(source.get("path", "/kaggle/input/chess-data"))
     if not local_path.exists():
         return []
@@ -447,10 +392,6 @@ def _copy_from_local(source: dict, data_dir: Path, max_files: int) -> List[Path]
 # ============================================================
 
 def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
-    """
-    Compile the C++ binpack loader with pybind11.
-    Returns True on success.
-    """
     cpp_loader_dir = Path(__file__).parent / "cpp_loader"
     if not cpp_loader_dir.exists():
         _create_cpp_loader_structure(cpp_loader_dir)
@@ -459,7 +400,6 @@ def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
     build_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Configure
         result = subprocess.run(
             ["cmake", ".."],
             cwd=build_path,
@@ -471,7 +411,6 @@ def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
             print(f"CMake configure failed: {result.stderr}")
             return False
 
-        # Build
         result = subprocess.run(
             ["make", "-j4"],
             cwd=build_path,
@@ -483,11 +422,10 @@ def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
             print(f"Make failed: {result.stderr}")
             return False
 
-        # Copy .so to cpp_loader_dir for import
         import shutil
         for so_file in build_path.glob("*.so"):
             shutil.copy2(so_file, cpp_loader_dir)
-        for pyd_file in build_path.glob("*.pyd"):  # Windows
+        for pyd_file in build_path.glob("*.pyd"):
             shutil.copy2(pyd_file, cpp_loader_dir)
 
         print("C++ binpack loader compiled successfully")
@@ -502,76 +440,55 @@ def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
 
 
 def _create_cpp_loader_structure(cpp_loader_dir: Path):
-    """Create minimal C++ loader structure for compilation."""
     cpp_loader_dir.mkdir(parents=True, exist_ok=True)
 
-    # CMakeLists.txt
     cmake_content = '''
 cmake_minimum_required(VERSION 3.15)
 project(cpp_binpack_loader LANGUAGES CXX)
-
-# Find Python and pybind11
 find_package(Python3 REQUIRED COMPONENTS Development)
 find_package(pybind11 REQUIRED)
-
-# Add the loader
 pybind11_add_module(cpp_loader src/binpack_loader.cpp src/bindings.cpp)
-
-# Set C++ standard
 set_target_properties(cpp_loader PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     PYTHON_MODULE_SUFFIX "${PYTHON_MODULE_EXTENSION}"
 )
-
-# Output directly to parent directory for easy import
 set_target_properties(cpp_loader PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/..
 )
 '''
     (cpp_loader_dir / "CMakeLists.txt").write_text(cmake_content)
 
-    # src/binpack_loader.h
-    header_content = '''
+    (cpp_loader_dir / "src").mkdir(exist_ok=True)
+    (cpp_loader_dir / "src" / "binpack_loader.h").write_text('''
 #pragma once
-
 #include <vector>
 #include <string>
 #include <cstdint>
 #include <fstream>
 #include <memory>
 #include <array>
-
 namespace binpack {
-
 struct Position {
-    std::vector<uint16_t> features;  // Sparse feature indices
-    std::vector<float> weights;      // Feature weights (usually 1.0)
-    std::array<float, 3> wdl;        // Win/Draw/Loss probabilities
-    float eval;                      // Centipawn evaluation
-    int8_t game_result;              // 1=White win, 0=Draw, -1=Black win
+    std::vector<uint16_t> features;
+    std::vector<float> weights;
+    std::array<float, 3> wdl;
+    float eval;
+    int8_t game_result;
 };
-
 class BinpackDataset {
 public:
     explicit BinpackDataset(const std::string& filepath);
     ~BinpackDataset();
-
     size_t size() const;
     Position operator[](size_t idx) const;
-
 private:
     struct Impl;
     std::unique_ptr<Impl> pimpl_;
 };
-
-} // namespace binpack
-'''
-    (cpp_loader_dir / "src").mkdir(exist_ok=True)
-    (cpp_loader_dir / "src" / "binpack_loader.h").write_text(header_content)
-
-    # src/binpack_loader.cpp
-    cpp_content = '''
+}
+''')
+    (cpp_loader_dir / "src" / "binpack_loader.cpp").write_text('''
 #include "binpack_loader.h"
 #include <vector>
 #include <string>
@@ -580,103 +497,57 @@ private:
 #include <cstring>
 #include <stdexcept>
 #include <cstdint>
-
 namespace binpack {
-
 struct BinpackDataset::Impl {
     std::ifstream file;
     size_t num_positions = 0;
     std::vector<size_t> position_offsets;
     uint32_t version = 0;
-
     explicit Impl(const std::string& filepath) : file(filepath, std::ios::binary) {
-        if (!file.is_open()) {
-            throw std::runtime_error("Failed to open binpack file: " + filepath);
-        }
-        read_header();
-        build_index();
+        if (!file.is_open()) throw std::runtime_error("Failed to open: " + filepath);
+        read_header(); build_index();
     }
-
     void read_header() {
-        // Binpack header: 4 bytes magic, 4 bytes version, 8 bytes num_positions
-        char magic[4];
-        file.read(magic, 4);
-        if (std::strncmp(magic, "BINP", 4) != 0) {
-            throw std::runtime_error("Invalid binpack magic number");
-        }
+        char magic[4]; file.read(magic, 4);
+        if (std::strncmp(magic, "BINP", 4) != 0) throw std::runtime_error("Invalid magic");
         file.read(reinterpret_cast<char*>(&version), 4);
         file.read(reinterpret_cast<char*>(&num_positions), 8);
     }
-
     void build_index() {
         position_offsets.reserve(num_positions);
         size_t pos = file.tellg();
         for (size_t i = 0; i < num_positions; ++i) {
             position_offsets.push_back(pos);
-            // Skip position data:
-            // 2 bytes num_features
-            // num_features * 2 bytes features (uint16)
-            // num_features * 4 bytes weights (float)
-            // 3 * 4 bytes wdl (float)
-            // 4 bytes eval (float)
-            // 1 byte game_result (int8)
-            uint16_t num_features;
-            file.read(reinterpret_cast<char*>(&num_features), 2);
-            pos = file.tellg();
-            pos += num_features * (2 + 4); // features + weights
-            pos += 3 * 4; // wdl
-            pos += 4;     // eval
-            pos += 1;     // game_result
-            file.seekg(pos);
+            uint16_t num_features; file.read(reinterpret_cast<char*>(&num_features), 2);
+            pos = file.tellg(); pos += num_features * 6 + 13; file.seekg(pos);
         }
     }
-
     Position read_position(size_t idx) {
-        if (idx >= num_positions) {
-            throw std::out_of_range("Position index out of range");
-        }
+        if (idx >= num_positions) throw std::out_of_range("Index out of range");
         file.seekg(position_offsets[idx]);
-        Position pos;
-        uint16_t num_features;
+        Position pos; uint16_t num_features;
         file.read(reinterpret_cast<char*>(&num_features), 2);
-        pos.features.resize(num_features);
-        pos.weights.resize(num_features);
+        pos.features.resize(num_features); pos.weights.resize(num_features);
         file.read(reinterpret_cast<char*>(pos.features.data()), num_features * 2);
         file.read(reinterpret_cast<char*>(pos.weights.data()), num_features * 4);
-        file.read(reinterpret_cast<char*>(pos.wdl.data()), 3 * 4);
+        file.read(reinterpret_cast<char*>(pos.wdl.data()), 12);
         file.read(reinterpret_cast<char*>(&pos.eval), 4);
         file.read(reinterpret_cast<char*>(&pos.game_result), 1);
         return pos;
     }
 };
-
-BinpackDataset::BinpackDataset(const std::string& filepath)
-    : pimpl_(std::make_unique<Impl>(filepath)) {}
-
+BinpackDataset::BinpackDataset(const std::string& filepath) : pimpl_(std::make_unique<Impl>(filepath)) {}
 BinpackDataset::~BinpackDataset() = default;
-
-size_t BinpackDataset::size() const {
-    return pimpl_->num_positions;
+size_t BinpackDataset::size() const { return pimpl_->num_positions; }
+BinpackDataset::Position BinpackDataset::operator[](size_t idx) const { return pimpl_->read_position(idx); }
 }
-
-BinpackDataset::Position BinpackDataset::operator[](size_t idx) const {
-    return pimpl_->read_position(idx);
-}
-
-} // namespace binpack
-'''
-    (cpp_loader_dir / "src" / "binpack_loader.cpp").write_text(cpp_content)
-
-    # src/bindings.cpp
-    bindings_content = '''
+''')
+    (cpp_loader_dir / "src" / "bindings.cpp").write_text('''
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include "binpack_loader.h"
-
-namespace py = pybind11;
-using namespace binpack;
-
+namespace py = pybind11; using namespace binpack;
 PYBIND11_MODULE(cpp_loader, m) {
     py::class_<BinpackDataset>(m, "BinpackDataset")
         .def(py::init<const std::string&>())
@@ -687,16 +558,12 @@ PYBIND11_MODULE(cpp_loader, m) {
                 py::array_t<uint16_t>(pos.features.size(), pos.features.data()),
                 py::array_t<float>(pos.weights.size(), pos.weights.data()),
                 py::array_t<float>(3, pos.wdl.data()),
-                pos.eval,
-                pos.game_result
+                pos.eval, pos.game_result
             );
         });
-
-    m.doc() = "Fast C++ binpack loader for NNUE training";
+    m.doc() = "Fast C++ binpack loader";
 }
-'''
-    (cpp_loader_dir / "src" / "bindings.cpp").write_text(bindings_content)
-
+''')
     print(f"Created C++ loader structure at {cpp_loader_dir}")
 
 
@@ -709,7 +576,6 @@ def create_dataloader(
     dataset: Optional[StreamingBinpackDataset] = None,
     is_train: bool = True,
 ) -> DataLoader:
-    """Create optimized DataLoader for binpack data."""
     hw_cfg = config.get("hardware", {})
     data_cfg = config.get("data", {})
     train_cfg = config.get("training", {})
@@ -734,13 +600,11 @@ def create_dataloader(
         pin_memory=hw_cfg.get("pin_memory", True),
         drop_last=is_train and data_cfg.get("drop_last_batch", True),
         worker_init_fn=_worker_init_fn,
-        # Performance: use multiprocessing context
         multiprocessing_context=mp.get_context('forkserver') if hasattr(mp, 'get_context') else None,
     )
 
 
 def _worker_init_fn(worker_id: int):
-    """Initialize worker with unique seed."""
     import numpy as np
     seed = torch.initial_seed() % 2**32
     np.random.seed(seed)

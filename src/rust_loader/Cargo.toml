@@ -1,0 +1,27 @@
+[package]
+name = "binpack_loader"
+version = "0.1.0"
+edition = "2021"
+description = "Fast binpack loader for NNUE training via PyO3"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "binpack_loader"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+numpy = "0.22"
+ndarray = "0.16"
+byteorder = "1.5"
+thiserror = "1.0"
+rayon = "1.10"
+
+[build-dependencies]
+pyo3-build-config = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
