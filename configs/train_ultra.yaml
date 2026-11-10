@@ -165,6 +165,8 @@ hf:
   max_retries: 5
   backoff_base: 30
   token_env: "HF_TOKEN"
+  auto_create_repo: true
+  repo_private: false
 
 export:
   dir: "/kaggle/working/export"

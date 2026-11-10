@@ -73,6 +73,8 @@ class HFUploader:
         self.max_retries = hf_cfg.get("max_retries", 5)
         self.backoff_base = hf_cfg.get("backoff_base", 30)
         self.bandwidth_limit_mbps = hf_cfg.get("bandwidth_limit_mbps", 0)  # 0 = unlimited
+        self.auto_create_repo = hf_cfg.get("auto_create_repo", True)
+        self.repo_private = hf_cfg.get("repo_private", False)
 
         self._queue: queue.PriorityQueue = queue.PriorityQueue()
         self._worker_thread: Optional[threading.Thread] = None
@@ -96,6 +98,36 @@ class HFUploader:
             self._hf_available = True
         except ImportError:
             logger.warning("huggingface_hub not available, uploads disabled")
+
+    def _ensure_repo_exists(self, api):
+        """Create repo if it doesn't exist."""
+        if not self.repo_id:
+            return False
+        
+        try:
+            # Check if repo exists
+            api.repo_info(repo_id=self.repo_id, repo_type="model")
+            logger.info(f"Repo exists: {self.repo_id}")
+            return True
+        except Exception:
+            if not self.auto_create_repo:
+                logger.warning(f"Repo {self.repo_id} doesn't exist and auto_create_repo=False")
+                return False
+            
+            # Create repo
+            try:
+                logger.info(f"Creating repo: {self.repo_id}")
+                api.create_repo(
+                    repo_id=self.repo_id,
+                    repo_type="model",
+                    private=self.repo_private,
+                    exist_ok=True,
+                )
+                logger.info(f"Repo created: {self.repo_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to create repo {self.repo_id}: {e}")
+                return False
 
     def start(self):
         """Start background upload worker."""
@@ -165,8 +197,11 @@ class HFUploader:
     def _worker(self):
         """Background worker thread."""
         api = None
+        repo_ready = False
         if self._hf_available and self.token:
             api = self.HfApi(token=self.token)
+            # Ensure repo exists before processing uploads
+            repo_ready = self._ensure_repo_exists(api)
 
         while not self._shutdown.is_set():
             # Check pause
@@ -180,9 +215,9 @@ class HFUploader:
             except queue.Empty:
                 continue
 
-            if not self._hf_available or not api:
+            if not self._hf_available or not api or not repo_ready:
                 task.status = UploadStatus.FAILED
-                task.error = "huggingface_hub not available or no token"
+                task.error = "huggingface_hub not available, no token, or repo not ready"
                 self._stats["failed"] += 1
                 self._queue.task_done()
                 continue
