@@ -17,6 +17,7 @@ Based on official Stockfish nettest recipes:
 
 import math
 import time
+import sys
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -26,6 +27,13 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.utilities.grads import grad_norm
+
+try:
+    from tqdm.auto import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
 
 from src.model import NNUEModel
 from src.checkpoint import CheckpointManager
@@ -475,6 +483,108 @@ class TimeLimitCallback(Callback):
             trainer.should_stop = True
 
 
+class TQDMProgressBar(Callback):
+    """Custom tqdm progress bar with ETA, steps/sec, and detailed metrics."""
+    
+    def __init__(self, max_steps: int, refresh_rate: int = 1):
+        super().__init__()
+        self.max_steps = max_steps
+        self.refresh_rate = refresh_rate
+        self.pbar = None
+        self.start_time = None
+        self.last_update_time = None
+        self.last_step = 0
+        
+    def on_train_start(self, trainer, pl_module):
+        if not TQDM_AVAILABLE:
+            return
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.last_step = 0
+        
+        # Get current step (for resume)
+        current_step = getattr(pl_module, 'training_state', None)
+        initial = current_step.step if current_step else 0
+        
+        self.pbar = tqdm(
+            total=self.max_steps,
+            initial=initial,
+            desc="Training",
+            unit="step",
+            dynamic_ncols=True,
+            leave=True,
+            file=sys.stdout,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+        )
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not TQDM_AVAILABLE or self.pbar is None:
+            return
+            
+        current_step = trainer.global_step
+        
+        # Only update every refresh_rate steps
+        if current_step % self.refresh_rate != 0 and current_step != self.max_steps:
+            return
+            
+        now = time.time()
+        elapsed = now - self.start_time
+        step_diff = current_step - self.last_step
+        time_diff = now - self.last_update_time
+        
+        if time_diff > 0:
+            steps_per_sec = step_diff / time_diff
+        else:
+            steps_per_sec = 0
+        
+        # Calculate ETA
+        remaining_steps = self.max_steps - current_step
+        if steps_per_sec > 0:
+            eta_seconds = remaining_steps / steps_per_sec
+            eta_str = self._format_time(eta_seconds)
+        else:
+            eta_str = "∞"
+        
+        # Get metrics
+        metrics = trainer.callback_metrics
+        loss = metrics.get("train/loss_total", None)
+        lr = metrics.get("lr", None)
+        lambda_val = metrics.get("train/lambda", None)
+        
+        # Update progress bar
+        postfix = {
+            "loss": f"{loss:.4f}" if loss is not None else "N/A",
+            "lr": f"{lr:.2e}" if lr is not None else "N/A",
+            "λ": f"{lambda_val:.3f}" if lambda_val is not None else "N/A",
+            "steps/s": f"{steps_per_sec:.1f}",
+            "ETA": eta_str,
+        }
+        
+        self.pbar.set_postfix(postfix)
+        self.pbar.update(current_step - self.pbar.n)
+        
+        self.last_step = current_step
+        self.last_update_time = now
+    
+    def on_train_end(self, trainer, pl_module):
+        if self.pbar is not None:
+            self.pbar.close()
+            self.pbar = None
+    
+    def _format_time(self, seconds: float) -> str:
+        """Format seconds as HH:MM:SS or MM:SS."""
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            m = int(seconds // 60)
+            s = int(seconds % 60)
+            return f"{m}m{s:02d}s"
+        else:
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            return f"{h}h{m:02d}m"
+
+
 def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager, hf_uploader: HFUploader) -> pl.Trainer:
     """Create PyTorch Lightning trainer with ultra-optimized settings."""
     hw_cfg = config.get("hardware", {})
@@ -482,10 +592,16 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     log_cfg = config.get("logging", {})
     adv_cfg = config.get("advanced", {})
     
-    # Callbacks - TimeLimitCallback handles time budget; checkpointing done by module
+    max_steps = config.get("training", {}).get("lr_schedule", {}).get("total_steps", 5108000)
+    
+    # Callbacks - TimeLimitCallback handles time budget; TQDMProgressBar shows progress
     callbacks = [
         TimeLimitCallback(
             max_hours=time_cfg.get("hours", 9.5),
+        ),
+        TQDMProgressBar(
+            max_steps=max_steps,
+            refresh_rate=log_cfg.get("progress_bar_refresh_rate", 10),
         ),
     ]
     

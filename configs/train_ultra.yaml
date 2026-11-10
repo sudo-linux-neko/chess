@@ -183,6 +183,7 @@ logging:
   dir: "/kaggle/working/logs"
   level: "INFO"
   log_every_n_steps: 100
+  progress_bar_refresh_rate: 10
   log_gradients: false
   log_parameters: false
   wandb: false
