@@ -1,0 +1,64 @@
+# Data
+data/
+*.binpack
+
+# Checkpoints
+checkpoints/
+*.ckpt
+*.tmp
+
+# Exports
+export/
+*.nnue
+
+# Logs
+logs/
+*.csv
+*.log
+tensorboard/
+lightning_logs/
+
+# Secrets
+*.env
+.env
+kaggle_secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Build
+build/
+dist/
+*.egg-info/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.o
+*.a
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb

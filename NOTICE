@@ -1,0 +1,28 @@
+NOTICE
+
+This project includes code derived from the following sources:
+
+1. Stockfish NNUE PyTorch Training Code
+   Source: https://github.com/official-stockfish/nnue-pytorch
+   License: GNU GPL v3.0
+   Copyright: The Stockfish developers
+   Modifications: Adapted for Kaggle training, added checkpointing/HF upload,
+                  time-aware scheduling, export verification, and CLI entry points.
+
+2. PyTorch Lightning
+   Source: https://github.com/Lightning-AI/lightning
+   License: Apache-2.0
+   Copyright: The PyTorch Lightning team
+
+3. Hugging Face Hub
+   Source: https://github.com/huggingface/huggingface_hub
+   License: Apache-2.0
+   Copyright: The Hugging Face team
+
+4. Ranger Optimizer (RAdam + Lookahead)
+   Source: https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer
+   License: Apache-2.0
+   Copyright: Less Wright
+
+This software is distributed under the GNU GPL v3.0 license.
+See LICENSE file for full terms.

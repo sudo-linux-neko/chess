@@ -1,0 +1,142 @@
+# NNUE Trainer Configuration
+# Copyright (C) 2026 Vaibhav
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# ============================================================
+# Hardware & Distributed Training
+# ============================================================
+hardware:
+  gpus: 2                    # Number of GPUs (0 = CPU only)
+  precision: "16-mixed"      # "16-mixed" (fp16), "32-true" (fp32), "bf16-mixed"
+  num_workers: 8             # DataLoader workers per GPU
+  prefetch_factor: 4         # Batches prefetched per worker
+  persistent_workers: true   # Keep workers alive between epochs
+  pin_memory: true           # Pinned memory for faster GPU transfer
+
+# ============================================================
+# Model Architecture (HalfKAv2_hm)
+# ============================================================
+model:
+  feature_set: "HalfKAv2_hm"  # Feature set name
+  input_dim: 81920            # 64 king squares * 1280 features (fixed)
+  ft_size: 256                # Feature transformer output per bucket
+  hidden_sizes: [32, 32]      # L1, L2 sizes (small net for 10h on T4)
+  output_size: 1              # Scalar evaluation output
+  clipped_relu_max: 1.0       # ClippedReLU upper bound
+  dropout: 0.0                # No dropout for NNUE
+
+# ============================================================
+# Training Hyperparameters
+# ============================================================
+training:
+  batch_size: 16384           # Global batch size (8192 per GPU)
+  max_positions: 41000000000  # ~41B positions in 9.5h @ 1.2M pos/s
+  learning_rate: 8.0e-4       # Peak LR for Ranger/AdamW
+  min_lr_ratio: 0.01          # Cosine decay to 1% of peak
+  warmup_ratio: 0.01          # Linear warmup for 1% of steps
+  weight_decay: 1.0e-4        # L2 regularization
+  gradient_clip_val: 1.0      # Gradient clipping (norm)
+  accumulate_grad_batches: 1  # Effective batch = batch_size * accumulate
+
+  # Loss blending
+  wdl_lambda: 0.5             # λ for WDL loss (0.5 = equal blend)
+  score_scale: 370.0          # Centipawn → WDL sigmoid scale (Stockfish Q)
+
+  # Optimizer
+  optimizer: "ranger"         # "ranger" | "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-8
+
+# ============================================================
+# Time Budget & Scheduling
+# ============================================================
+time_budget:
+  hours: 10.0                 # Total wall-clock budget
+  setup_minutes: 30           # Estimated setup time (deps, compile, download)
+  checkpoint_interval_min: 20 # Save checkpoint every N minutes
+  final_save_min: 5           # Reserve N minutes for final save + upload
+
+# ============================================================
+# Data Pipeline
+# ============================================================
+data:
+  data_dir: "/kaggle/working/data"
+  max_data_gb: 15             # Cap disk usage for data
+  shuffle_buffer_mb: 100      # In-memory shuffle buffer (~1M positions)
+  num_files_simultaneous: 3   # Rotate between N files for variety
+
+  # Data sources (tried in order)
+  sources:
+    - type: "huggingface"
+      repo_id: "leela-chess/lichess-binned"
+      pattern: "*.binpack"
+    - type: "http"
+      base_url: "https://trainingdata.stockfishchess.org/"
+      pattern: "*.binpack"
+    - type: "local"
+      path: "/kaggle/input/chess-data"  # Fallback for Kaggle datasets
+
+# ============================================================
+# Checkpointing
+# ============================================================
+checkpoint:
+  dir: "/kaggle/working/checkpoints"
+  keep_last_n: 3              # Keep last N checkpoints locally
+  save_every_n_steps: null    # If set, overrides time-based interval
+  atomic_write: true          # Write to .tmp then rename
+  include_optimizer: true
+  include_scheduler: true
+  include_scaler: true
+  include_rng: true
+  include_data_position: true
+
+# ============================================================
+# Hugging Face Upload
+# ============================================================
+hf:
+  repo_id: "vaibhav/nnue-trainer-checkpoints"
+  token_env: "HF_TOKEN"       # Env var / Kaggle Secret name
+  create_repo: true           # Auto-create if missing
+  private: false              # Public repo
+  upload_workers: 2           # Background upload threads
+  max_retries: 5
+  retry_backoff_base: 1.0     # Seconds (exponential)
+  upload_logs: true           # Upload training logs CSV
+  upload_exports: true        # Upload latest .nnue
+
+# ============================================================
+# Export & Verification
+# ============================================================
+export:
+  dir: "/kaggle/working/export"
+  quantize: true              # Quantize to int8
+  quantization_method: "per_channel_symmetric"
+  verify: true                # Verify exported net matches PyTorch
+  verify_samples: 10000       # Test positions for verification
+  verify_tolerance_cp: 0.01   # Max mean abs error (centipawns)
+  verify_max_error_cp: 1.0    # Max single-position error (centipawns)
+
+# ============================================================
+# Logging
+# ============================================================
+logging:
+  log_every_n_steps: 100
+  log_dir: "/kaggle/working/logs"
+  csv_log: true
+  tensorboard: true
+  log_gpu_stats: true
+  log_grad_norm: true
+
+# ============================================================
+# Smoke Test Overrides (activated with --smoke-test)
+# ============================================================
+smoke_test:
+  enabled: false
+  max_positions: 1000
+  batch_size: 256
+  time_budget_hours: 0.05     # 3 minutes
+  checkpoint_interval_min: 1
+  num_workers: 0
+  data_max_files: 1
+  fake_hf_upload: true
