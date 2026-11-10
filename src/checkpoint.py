@@ -2,85 +2,214 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-Checkpoint Management for NNUE Training.
+Ultra-Optimized Checkpoint Management.
 
-Handles atomic saves, resume logic, local retention, and integration with HF uploader.
+Features:
+- Atomic writes with .tmp rename pattern
+- Full state restoration (model, optimizer, scheduler, scaler, RNG, data position)
+- Keep-last-N + keep-best-N rotation
+- Metadata tracking (step, loss, time, git sha)
+- Background upload queue integration
+- Corruption detection with SHA256
 """
 
 import os
-import torch
-import shutil
-import hashlib
 import json
 import time
+import hashlib
+import shutil
+import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
+from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, asdict
-from threading import Lock
+from datetime import datetime
+
+import torch
+import torch.nn as nn
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 
 
 @dataclass
 class CheckpointMetadata:
-    """Metadata for a checkpoint file."""
+    """Metadata for a checkpoint."""
     step: int
     epoch: int
-    wall_time_elapsed: float
-    loss: float
+    samples_seen: int
+    train_loss: float
+    val_loss: float
     best_val_loss: float
-    config_hash: str
-    file_size: int
-    sha256: str
-    timestamp: float
+    learning_rate: float
+    lambda_val: float
+    time_elapsed: float
+    timestamp: str
+    git_sha: Optional[str] = None
+    config_hash: Optional[str] = None
+    file_sha256: Optional[str] = None
 
 
 class CheckpointManager:
     """
-    Manages checkpoint saving, loading, and retention.
-
+    Manages training checkpoints with atomic writes and rotation.
+    
     Features:
-    - Atomic writes (temp file + rename)
-    - Keep last N checkpoints
-    - Resume from local or HF
-    - Metadata tracking
+    - Atomic writes: write to .tmp, fsync, rename
+    - Keep-last-N: always keep N most recent
+    - Keep-best-N: keep N best by validation loss
+    - Metadata sidecar: .meta.json for quick inspection
+    - Corruption detection: SHA256 verification
+    - Exact resume: full state including RNG and data position
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
         ckpt_cfg = config.get("checkpoint", {})
 
         self.checkpoint_dir = Path(ckpt_cfg.get("dir", "/kaggle/working/checkpoints"))
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        self.keep_last_n = ckpt_cfg.get("keep_last_n", 3)
-        self.atomic_write = ckpt_cfg.get("atomic_write", True)
-        self.include_optimizer = ckpt_cfg.get("include_optimizer", True)
-        self.include_scheduler = ckpt_cfg.get("include_scheduler", True)
-        self.include_scaler = ckpt_cfg.get("include_scaler", True)
-        self.include_rng = ckpt_cfg.get("include_rng", True)
-        self.include_data_position = ckpt_cfg.get("include_data_position", True)
+        self.keep_last_n = ckpt_cfg.get("keep_last_n", 5)
+        self.keep_best_n = ckpt_cfg.get("keep_best_n", 3)
+        self.save_optimizer = ckpt_cfg.get("save_optimizer", True)
+        self.save_scheduler = ckpt_cfg.get("save_scheduler", True)
+        self.save_scaler = ckpt_cfg.get("save_scaler", True)
+        self.save_rng = ckpt_cfg.get("save_rng", True)
+        self.save_data_state = ckpt_cfg.get("save_data_state", True)
+        self.atomic_writes = ckpt_cfg.get("atomic_writes", True)
 
-        self._lock = Lock()
-        self._metadata_file = self.checkpoint_dir / "metadata.json"
-        self._metadata: List[CheckpointMetadata] = self._load_metadata()
+        self._lock = threading.Lock()
+        self._metadata_cache: Dict[str, CheckpointMetadata] = {}
 
-    def _load_metadata(self) -> List[CheckpointMetadata]:
-        """Load checkpoint metadata from disk."""
-        if self._metadata_file.exists():
+    def save_checkpoint(
+        self,
+        model: nn.Module,
+        optimizer: Optional[Optimizer],
+        scheduler: Optional[LRScheduler],
+        scaler: Optional[torch.cuda.amp.GradScaler],
+        training_state: Any,
+        config: Dict[str, Any],
+        data_state: Optional[Dict[str, Any]] = None,
+        ema_model: Optional[nn.Module] = None,
+        is_best: bool = False,
+        suffix: str = "",
+    ) -> Optional[Path]:
+        """Save complete training checkpoint atomically."""
+        with self._lock:
+            step = getattr(training_state, 'step', 0)
+            timestamp = datetime.utcnow().isoformat() + 'Z'
+
+            # Prepare state dict
+            state = {
+                "model": model.state_dict(),
+                "training_state": self._serialize_training_state(training_state),
+                "config": config,
+                "timestamp": timestamp,
+                "step": step,
+            }
+
+            # Optional components
+            if self.save_optimizer and optimizer is not None:
+                state["optimizer"] = optimizer.state_dict()
+            if self.save_scheduler and scheduler is not None:
+                state["scheduler"] = scheduler.state_dict()
+            if self.save_scaler and scaler is not None:
+                state["scaler"] = scaler.state_dict()
+            if self.save_rng:
+                state["rng"] = self._get_rng_state()
+            if self.save_data_state and data_state is not None:
+                state["data_state"] = data_state
+            if ema_model is not None:
+                state["ema_model"] = ema_model.state_dict()
+
+            # Generate filename
+            if is_best:
+                filename = f"best{suffix}.pt"
+            else:
+                filename = f"step_{step:08d}{suffix}.pt"
+
+            tmp_path = self.checkpoint_dir / f"{filename}.tmp"
+            final_path = self.checkpoint_dir / filename
+
             try:
-                with open(self._metadata_file, 'r') as f:
-                    data = json.load(f)
-                return [CheckpointMetadata(**item) for item in data]
-            except Exception:
-                pass
-        return []
+                # Atomic write
+                if self.atomic_writes:
+                    self._atomic_save(state, tmp_path, final_path)
+                else:
+                    torch.save(state, final_path)
 
-    def _save_metadata(self):
-        """Save checkpoint metadata to disk."""
-        try:
-            with open(self._metadata_file, 'w') as f:
-                json.dump([asdict(m) for m in self._metadata], f, indent=2)
-        except Exception as e:
-            print(f"Warning: Failed to save metadata: {e}")
+                # Compute SHA256
+                file_sha256 = self._compute_sha256(final_path)
+
+                # Create metadata
+                metadata = CheckpointMetadata(
+                    step=step,
+                    epoch=getattr(training_state, 'epoch', 0),
+                    samples_seen=getattr(training_state, 'samples_seen', 0),
+                    train_loss=getattr(training_state, 'train_losses', [0])[-1] if getattr(training_state, 'train_losses', None) else 0,
+                    val_loss=getattr(training_state, 'val_losses', [0])[-1] if getattr(training_state, 'val_losses', None) else 0,
+                    best_val_loss=getattr(training_state, 'best_val_loss', float('inf')),
+                    learning_rate=optimizer.param_groups[0]['lr'] if optimizer else 0,
+                    lambda_val=getattr(training_state, 'lambda_history', [0])[-1] if getattr(training_state, 'lambda_history', None) else 0,
+                    time_elapsed=getattr(training_state, 'time_elapsed', 0),
+                    timestamp=timestamp,
+                    git_sha=self._get_git_sha(),
+                    config_hash=self._hash_config(config),
+                    file_sha256=file_sha256,
+                )
+
+                # Save metadata sidecar
+                meta_path = final_path.with_suffix('.meta.json')
+                with open(meta_path, 'w') as f:
+                    json.dump(asdict(metadata), f, indent=2)
+
+                # Update cache
+                self._metadata_cache[str(final_path)] = metadata
+
+                # Rotation
+                self._rotate_checkpoints(is_best)
+
+                print(f"Checkpoint saved: {final_path} (step={step}, sha256={file_sha256[:16]}...)")
+                return final_path
+
+            except Exception as e:
+                print(f"Checkpoint save failed: {e}")
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+                return None
+
+    def _atomic_save(self, state: Dict, tmp_path: Path, final_path: Path):
+        """Save to temp file, fsync, then atomic rename."""
+        torch.save(state, tmp_path)
+        # Ensure data is on disk
+        with open(tmp_path, 'rb') as f:
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic rename
+        tmp_path.rename(final_path)
+
+    def _serialize_training_state(self, training_state: Any) -> Dict:
+        """Serialize training state to dict."""
+        if hasattr(training_state, '__dict__'):
+            return {k: v for k, v in training_state.__dict__.items() 
+                   if not k.startswith('_')}
+        return dict(training_state) if isinstance(training_state, dict) else {}
+
+    def _get_rng_state(self) -> Dict:
+        """Get all RNG states for exact reproducibility."""
+        return {
+            "torch": torch.get_rng_state(),
+            "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy": __import__('numpy').random.get_state(),
+            "python": __import__('random').getstate(),
+        }
+
+    def _set_rng_state(self, state: Dict):
+        """Restore all RNG states."""
+        torch.set_rng_state(state["torch"])
+        if state["torch_cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["torch_cuda"])
+        __import__('numpy').random.set_state(state["numpy"])
+        __import__('random').setstate(state["python"])
 
     def _compute_sha256(self, filepath: Path) -> str:
         """Compute SHA256 of file."""
@@ -90,298 +219,197 @@ class CheckpointManager:
                 sha256.update(chunk)
         return sha256.hexdigest()
 
-    def _compute_config_hash(self, config: dict) -> str:
-        """Compute hash of relevant config for compatibility checking."""
-        # Only hash architecture-affecting config
-        relevant_keys = ["model", "training"]
-        relevant_config = {k: config.get(k) for k in relevant_keys}
-        config_str = json.dumps(relevant_config, sort_keys=True)
+    def _verify_sha256(self, filepath: Path, expected: str) -> bool:
+        """Verify file integrity."""
+        return self._compute_sha256(filepath) == expected
+
+    def _get_git_sha(self) -> Optional[str]:
+        """Get current git commit SHA."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    def _hash_config(self, config: Dict) -> str:
+        """Hash config for reproducibility tracking."""
+        import yaml
+        config_str = yaml.dump(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]
 
-    def save_checkpoint(
-        self,
-        model: torch.nn.Module,
-        optimizer: Union[torch.optim.Optimizer, List[torch.optim.Optimizer]],
-        scheduler: Union[torch.optim.lr_scheduler._LRScheduler, List, Dict],
-        scaler: Optional[torch.cuda.amp.GradScaler],
-        training_state: Any,
-        config: dict,
-    ) -> Optional[Path]:
-        """
-        Save a full training checkpoint atomically.
+    def _rotate_checkpoints(self, is_best: bool = False):
+        """Rotate checkpoints: keep last N + best N."""
+        # Get all checkpoint files
+        checkpoints = sorted(
+            self.checkpoint_dir.glob("step_*.pt"),
+            key=lambda p: int(p.stem.split('_')[1]) if '_' in p.stem else 0
+        )
+        best_checkpoints = sorted(
+            self.checkpoint_dir.glob("best*.pt"),
+            key=lambda p: self._get_val_loss(p)
+        )
 
-        Returns:
-            Path to saved checkpoint, or None on failure.
-        """
-        with self._lock:
-            step = getattr(training_state, 'step', 0)
-            timestamp = time.time()
+        # Remove old step checkpoints
+        while len(checkpoints) > self.keep_last_n:
+            old = checkpoints.pop(0)
+            old.unlink(missing_ok=True)
+            old.with_suffix('.meta.json').unlink(missing_ok=True)
 
-            # Prepare checkpoint dict
-            checkpoint = {
-                "model": model.state_dict(),
-                "step": step,
-                "epoch": getattr(training_state, 'epoch', 0),
-                "wall_time_elapsed": getattr(training_state, 'wall_time_elapsed', 0),
-                "best_val_loss": getattr(training_state, 'best_val_loss', float('inf')),
-                "config": config,
-                "config_hash": self._compute_config_hash(config),
-                "timestamp": timestamp,
-            }
+        # Remove old best checkpoints (keep only best N)
+        while len(best_checkpoints) > self.keep_best_n:
+            old = best_checkpoints.pop(-1)  # Remove worst
+            old.unlink(missing_ok=True)
+            old.with_suffix('.meta.json').unlink(missing_ok=True)
 
-            # Add optimizer state
-            if self.include_optimizer and optimizer is not None:
-                if isinstance(optimizer, list):
-                    checkpoint["optimizer"] = [opt.state_dict() for opt in optimizer]
-                else:
-                    checkpoint["optimizer"] = optimizer.state_dict()
-
-            # Add scheduler state
-            if self.include_scheduler and scheduler is not None:
-                if isinstance(scheduler, list):
-                    checkpoint["scheduler"] = [sch.state_dict() for sch in scheduler]
-                elif isinstance(scheduler, dict):
-                    checkpoint["scheduler"] = {k: v.state_dict() for k, v in scheduler.items()}
-                else:
-                    checkpoint["scheduler"] = scheduler.state_dict()
-
-            # Add scaler state
-            if self.include_scaler and scaler is not None:
-                checkpoint["scaler"] = scaler.state_dict()
-
-            # Add RNG states
-            if self.include_rng:
-                checkpoint["rng_states"] = {
-                    "torch": torch.get_rng_state(),
-                    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                    "numpy": __import__('numpy').random.get_state(),
-                    "python": __import__('random').getstate(),
-                }
-
-            # Add data position
-            if self.include_data_position and hasattr(training_state, 'data_position'):
-                checkpoint["data_position"] = training_state.data_position
-
-            # Atomic write
-            ckpt_filename = f"step_{step:010d}.ckpt"
-            tmp_path = self.checkpoint_dir / f"{ckpt_filename}.tmp"
-            final_path = self.checkpoint_dir / ckpt_filename
-
-            try:
-                torch.save(checkpoint, tmp_path)
-
-                # Verify written file
-                if tmp_path.stat().st_size == 0:
-                    raise RuntimeError("Checkpoint file is empty")
-
-                # Atomic rename
-                if self.atomic_write:
-                    tmp_path.rename(final_path)
-                else:
-                    shutil.move(str(tmp_path), str(final_path))
-
-                # Update metadata
-                sha256 = self._compute_sha256(final_path)
-                file_size = final_path.stat().st_size
-
-                metadata = CheckpointMetadata(
-                    step=step,
-                    epoch=getattr(training_state, 'epoch', 0),
-                    wall_time_elapsed=getattr(training_state, 'wall_time_elapsed', 0),
-                    loss=0.0,  # Will be updated by training loop
-                    best_val_loss=getattr(training_state, 'best_val_loss', float('inf')),
-                    config_hash=checkpoint["config_hash"],
-                    file_size=file_size,
-                    sha256=sha256,
-                    timestamp=timestamp,
-                )
-
-                self._metadata.append(metadata)
-                self._prune_old_checkpoints()
-                self._save_metadata()
-
-                print(f"Checkpoint saved: {final_path} ({file_size / 1e6:.1f} MB)")
-                return final_path
-
-            except Exception as e:
-                print(f"Error saving checkpoint: {e}")
-                # Clean up temp file
-                if tmp_path.exists():
-                    tmp_path.unlink(missing_ok=True)
-                return None
-
-    def _prune_old_checkpoints(self):
-        """Remove old checkpoints beyond keep_last_n."""
-        if len(self._metadata) <= self.keep_last_n:
-            return
-
-        # Sort by step
-        self._metadata.sort(key=lambda m: m.step)
-
-        # Remove oldest
-        to_remove = self._metadata[:-self.keep_last_n]
-        for meta in to_remove:
-            ckpt_path = self.checkpoint_dir / f"step_{meta.step:010d}.ckpt"
-            try:
-                ckpt_path.unlink(missing_ok=True)
-                print(f"Removed old checkpoint: {ckpt_path}")
-            except Exception as e:
-                print(f"Warning: Failed to remove {ckpt_path}: {e}")
-
-        self._metadata = self._metadata[-self.keep_last_n:]
-
-    def find_latest_checkpoint(self) -> Optional[Path]:
-        """Find the latest checkpoint in local directory."""
-        checkpoints = list(self.checkpoint_dir.glob("step_*.ckpt"))
-        if not checkpoints:
-            return None
-
-        # Sort by step number
-        checkpoints.sort(key=lambda p: int(p.stem.split('_')[1]))
-        return checkpoints[-1]
+    def _get_val_loss(self, path: Path) -> float:
+        """Get validation loss from metadata."""
+        meta_path = path.with_suffix('.meta.json')
+        if meta_path.exists():
+            with open(meta_path) as f:
+                return json.load(f).get('val_loss', float('inf'))
+        return float('inf')
 
     def load_checkpoint(
         self,
-        checkpoint_path: Path,
-        model: torch.nn.Module,
-        optimizer: Optional[Union[torch.optim.Optimizer, List]] = None,
-        scheduler: Optional[Union[torch.optim.lr_scheduler._LRScheduler, List, Dict]] = None,
+        path: Union[str, Path],
+        model: nn.Module,
+        optimizer: Optional[Optimizer] = None,
+        scheduler: Optional[LRScheduler] = None,
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
-        map_location: Optional[Union[str, torch.device]] = None,
+        training_state: Optional[Any] = None,
+        data_state: Optional[Dict] = None,
+        ema_model: Optional[nn.Module] = None,
+        strict: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Load checkpoint and restore model/optimizer/scheduler/scaler states.
+        """Load checkpoint with full state restoration."""
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
 
-        Returns:
-            Dictionary with training_state and other metadata.
-        """
-        print(f"Loading checkpoint: {checkpoint_path}")
+        # Verify integrity
+        meta_path = path.with_suffix('.meta.json')
+        if meta_path.exists():
+            with open(meta_path) as f:
+                metadata = json.load(f)
+            if not self._verify_sha256(path, metadata.get('file_sha256', '')):
+                raise RuntimeError(f"Checkpoint corruption detected: {path}")
 
-        if map_location is None:
-            map_location = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+        print(f"Loading checkpoint: {path}")
+        checkpoint = torch.load(path, map_location='cpu')
 
         # Load model
-        model.load_state_dict(checkpoint["model"])
+        model.load_state_dict(checkpoint["model"], strict=strict)
 
         # Load optimizer
         if optimizer is not None and "optimizer" in checkpoint:
-            opt_state = checkpoint["optimizer"]
-            if isinstance(optimizer, list) and isinstance(opt_state, list):
-                for opt, state in zip(optimizer, opt_state):
-                    opt.load_state_dict(state)
-            elif not isinstance(optimizer, list):
-                optimizer.load_state_dict(opt_state)
+            optimizer.load_state_dict(checkpoint["optimizer"])
 
         # Load scheduler
         if scheduler is not None and "scheduler" in checkpoint:
-            sch_state = checkpoint["scheduler"]
-            if isinstance(scheduler, list) and isinstance(sch_state, list):
-                for sch, state in zip(scheduler, sch_state):
-                    sch.load_state_dict(state)
-            elif isinstance(scheduler, dict) and isinstance(sch_state, dict):
-                for k, sch in scheduler.items():
-                    if k in sch_state:
-                        sch.load_state_dict(sch_state[k])
-            elif not isinstance(scheduler, (list, dict)):
-                scheduler.load_state_dict(sch_state)
+            scheduler.load_state_dict(checkpoint["scheduler"])
 
         # Load scaler
         if scaler is not None and "scaler" in checkpoint:
             scaler.load_state_dict(checkpoint["scaler"])
 
-        # Load RNG states
-        if "rng_states" in checkpoint:
-            rng = checkpoint["rng_states"]
-            torch.set_rng_state(rng.get("torch", torch.get_rng_state()))
-            if rng.get("cuda") and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(rng["cuda"])
-            if rng.get("numpy"):
-                __import__('numpy').random.set_state(rng["numpy"])
-            if rng.get("python"):
-                __import__('random').setstate(rng["python"])
+        # Load RNG
+        if "rng" in checkpoint:
+            self._set_rng_state(checkpoint["rng"])
 
-        # Return training state for caller to restore
-        training_state = {
+        # Load EMA
+        if ema_model is not None and "ema_model" in checkpoint:
+            ema_model.load_state_dict(checkpoint["ema_model"])
+
+        # Return training state and data state for manual restoration
+        result = {
+            "training_state": checkpoint.get("training_state", {}),
+            "data_state": checkpoint.get("data_state", {}),
+            "config": checkpoint.get("config", {}),
             "step": checkpoint.get("step", 0),
-            "epoch": checkpoint.get("epoch", 0),
-            "wall_time_elapsed": checkpoint.get("wall_time_elapsed", 0),
-            "best_val_loss": checkpoint.get("best_val_loss", float('inf')),
-            "data_position": checkpoint.get("data_position", {}),
-            "rng_states": checkpoint.get("rng_states", {}),
-            "config_hash": checkpoint.get("config_hash", ""),
         }
 
-        print(f"Resumed from step {training_state['step']}, epoch {training_state['epoch']}")
-        return training_state
+        if training_state is not None and "training_state" in checkpoint:
+            self._restore_training_state(training_state, checkpoint["training_state"])
 
-    def verify_checkpoint(self, checkpoint_path: Path, config: dict) -> bool:
-        """Verify checkpoint integrity and config compatibility."""
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        if data_state is not None and "data_state" in checkpoint:
+            data_state.update(checkpoint["data_state"])
 
-            # Check config hash
-            saved_hash = checkpoint.get("config_hash", "")
-            current_hash = self._compute_config_hash(config)
-            if saved_hash != current_hash:
-                print(f"Warning: Config hash mismatch! Saved: {saved_hash}, Current: {current_hash}")
-                # Don't fail - just warn
+        print(f"Checkpoint loaded: step={result['step']}")
+        return result
 
-            # Check required keys
-            required_keys = ["model", "step", "config"]
-            for key in required_keys:
-                if key not in checkpoint:
-                    print(f"Checkpoint missing required key: {key}")
-                    return False
+    def _restore_training_state(self, training_state: Any, state_dict: Dict):
+        """Restore training state from dict."""
+        for key, value in state_dict.items():
+            if hasattr(training_state, key):
+                setattr(training_state, key, value)
 
-            return True
+    def find_latest_checkpoint(self) -> Optional[Path]:
+        """Find most recent checkpoint."""
+        checkpoints = list(self.checkpoint_dir.glob("step_*.pt"))
+        if not checkpoints:
+            return None
+        return max(checkpoints, key=lambda p: p.stat().st_mtime)
 
-        except Exception as e:
-            print(f"Checkpoint verification failed: {e}")
-            return False
+    def find_best_checkpoint(self) -> Optional[Path]:
+        """Find best checkpoint by validation loss."""
+        checkpoints = list(self.checkpoint_dir.glob("best*.pt"))
+        if not checkpoints:
+            return None
+        return min(checkpoints, key=self._get_val_loss)
 
-    def get_all_checkpoints(self) -> List[CheckpointMetadata]:
-        """Get list of all local checkpoints sorted by step."""
-        return sorted(self._metadata, key=lambda m: m.step)
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """List all checkpoints with metadata."""
+        result = []
+        for ckpt in sorted(self.checkpoint_dir.glob("*.pt")):
+            meta_path = ckpt.with_suffix('.meta.json')
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    result.append(json.load(f))
+            else:
+                result.append({
+                    "path": str(ckpt),
+                    "step": int(ckpt.stem.split('_')[1]) if '_' in ckpt.stem else 0,
+                    "size_mb": ckpt.stat().st_size / 1024**2,
+                })
+        return result
 
-    def cleanup_all(self):
-        """Remove all checkpoints and metadata."""
-        for meta in self._metadata:
-            ckpt_path = self.checkpoint_dir / f"step_{meta.step:010d}.ckpt"
-            ckpt_path.unlink(missing_ok=True)
-        self._metadata.clear()
-        self._save_metadata()
-        self._metadata_file.unlink(missing_ok=True)
 
-
-def find_resumable_checkpoint(config: dict, hf_uploader: 'HFUploader' = None) -> Optional[Path]:
-    """
-    Find the latest resumable checkpoint: local first, then HF.
-
-    Args:
-        config: Training configuration
-        hf_uploader: Optional HF uploader for remote check
-
-    Returns:
-        Path to checkpoint, or None if none found.
-    """
-    ckpt_manager = CheckpointManager(config)
-
-    # 1. Check local
-    local_ckpt = ckpt_manager.find_latest_checkpoint()
-    if local_ckpt and ckpt_manager.verify_checkpoint(local_ckpt, config):
-        print(f"Found local checkpoint: {local_ckpt}")
+def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
+    """Find the best checkpoint to resume from (local or HF)."""
+    checkpoint_manager = CheckpointManager(config)
+    
+    # Try local first
+    local_ckpt = checkpoint_manager.find_latest_checkpoint()
+    if local_ckpt and local_ckpt.exists():
         return local_ckpt
 
-    # 2. Check HF (if uploader provided)
-    if hf_uploader:
-        print("No valid local checkpoint, checking Hugging Face...")
-        hf_ckpt = hf_uploader.download_latest_checkpoint(config)
-        if hf_ckpt:
-            # Verify downloaded checkpoint
-            if ckpt_manager.verify_checkpoint(hf_ckpt, config):
-                print(f"Downloaded and verified HF checkpoint: {hf_ckpt}")
-                return hf_ckpt
+    # Try HF Hub
+    try:
+        from huggingface_hub import list_repo_files, hf_hub_download
+        repo_id = config.get("hf", {}).get("repo_id", "")
+        if repo_id:
+            files = list_repo_files(repo_id=repo_id, repo_type="model")
+            ckpt_files = [f for f in files if f.endswith(".pt") and "step_" in f]
+            if ckpt_files:
+                # Get latest by step number
+                latest = max(ckpt_files, key=lambda f: int(f.split('_')[1].split('.')[0]))
+                local_path = Path(config["checkpoint"]["dir"]) / latest
+                print(f"Downloading checkpoint from HF: {latest}")
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=latest,
+                    repo_type="model",
+                    local_dir=config["checkpoint"]["dir"],
+                    local_dir_use_symlinks=False,
+                )
+                return local_path
+    except Exception as e:
+        print(f"HF checkpoint download failed: {e}")
 
     return None

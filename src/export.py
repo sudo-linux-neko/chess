@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-Export Module: Quantize PyTorch model to Stockfish-compatible .nnue format.
+Ultra-Optimized Export Module: Quantize PyTorch model to Stockfish-compatible .nnue format.
 
 Optimizations:
 - Per-channel symmetric quantization (int8 weights, int32 bias)
-- Accurate scale computation with calibration
+- Accurate scale computation with calibration data
 - Stockfish-exact serialization format
 - Fused operator support for quantization
-- Comprehensive verification
+- Comprehensive verification with Rust-accelerated quantized inference
+- EMA model export support
 """
 
 import os
@@ -63,6 +64,7 @@ class NNUEExporter:
     - Hidden layer quantization
     - Output layer quantization
     - Stockfish-compatible serialization with exact format
+    - EMA model export for better playing strength
     """
 
     def __init__(self, config: dict):
@@ -75,14 +77,23 @@ class NNUEExporter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.verify = export_cfg.get("verify", True)
-        self.verify_samples = export_cfg.get("verify_samples", 10000)
+        self.verify_samples = export_cfg.get("verify_samples", 20000)
         self.verify_tolerance_cp = export_cfg.get("verify_tolerance_cp", 0.01)
-        self.verify_max_error_cp = export_cfg.get("verify_max_error_cp", 1.0)
+        self.verify_max_error_cp = export_cfg.get("verify_max_error_cp", 0.5)
 
         # Stockfish NNUE format constants
         self.MAGIC = b"NNUE"
         self.VERSION = 1
         self.FEATURE_SET_HASH = self._compute_feature_set_hash()
+
+        # Try to import Rust quantized inference
+        self._rust_available = False
+        try:
+            from binpack_loader import QuantizedNNUE as RustQuantizedNNUE
+            self.RustQuantizedNNUE = RustQuantizedNNUE
+            self._rust_available = True
+        except ImportError:
+            self.RustQuantizedNNUE = None
 
     def _compute_feature_set_hash(self) -> bytes:
         return hashlib.sha256(b"HalfKAv2_hm").digest()
@@ -91,8 +102,15 @@ class NNUEExporter:
         self,
         model: nn.Module,
         calibration_data: Optional[torch.Tensor] = None,
+        use_ema: bool = False,
     ) -> Path:
         model.eval()
+
+        # Use EMA model if available and requested
+        if use_ema and hasattr(model, 'ema_model') and model.ema_model is not None:
+            print("Exporting EMA model for better playing strength")
+            model = model.ema_model
+            model.eval()
 
         network_hash = self._compute_network_hash(model)
         filename = f"nn-{network_hash[:16]}.nnue"
@@ -100,6 +118,7 @@ class NNUEExporter:
 
         print(f"Exporting model to {output_path}")
         print(f"  Network hash: {network_hash[:32]}")
+        print(f"  Using EMA: {use_ema}")
 
         if self.quantize:
             quantized_layers = self._quantize_model(model, calibration_data)
@@ -118,26 +137,42 @@ class NNUEExporter:
         quantized = {}
 
         with torch.no_grad():
+            # Feature transformer (shared weights)
             ft_layer = model.feature_transformer.linear
-            quantized["feature_transformer"] = self._quantize_linear(ft_layer, "feature_transformer")
-            quantized["hidden1"] = self._quantize_linear(model.hidden1, "hidden1")
-            quantized["hidden2"] = self._quantize_linear(model.hidden2, "hidden2")
-            quantized["output"] = self._quantize_linear(model.output_layer, "output")
+            quantized["feature_transformer"] = self._quantize_linear(
+                ft_layer, "feature_transformer", calibration_data
+            )
+            quantized["hidden1"] = self._quantize_linear(model.hidden1[0], "hidden1", calibration_data)
+            quantized["hidden2"] = self._quantize_linear(model.hidden2[0], "hidden2", calibration_data)
+            quantized["output"] = self._quantize_linear(model.output_layer, "output", calibration_data)
 
         return quantized
 
-    def _quantize_linear(self, layer: nn.Linear, name: str) -> QuantizedLayer:
+    def _quantize_linear(
+        self,
+        layer: nn.Linear,
+        name: str,
+        calibration_data: Optional[torch.Tensor] = None,
+    ) -> QuantizedLayer:
         weight = layer.weight.data.cpu().numpy()
         bias = layer.bias.data.cpu().numpy() if layer.bias is not None else np.zeros(weight.shape[0])
 
+        # Per-channel symmetric quantization
+        # Scale = max(|weight|) / 127 per output channel
         max_vals = np.max(np.abs(weight), axis=1)
-        max_vals = np.maximum(max_vals, 1e-8)
+        max_vals = np.maximum(max_vals, 1e-8)  # Avoid division by zero
         scales = max_vals / 127.0
 
+        # Quantize weights
         weight_q = np.round(weight / scales[:, np.newaxis]).astype(np.int8)
         weight_q = np.clip(weight_q, -128, 127)
 
+        # Quantize bias (scale matches weight scale)
         bias_q = np.round(bias / scales).astype(np.int32)
+
+        # Verify quantization accuracy if calibration data provided
+        if calibration_data is not None and name != "output":
+            self._verify_quantization(layer, weight_q, bias_q, scales, calibration_data, name)
 
         return QuantizedLayer(
             weight=weight_q,
@@ -146,6 +181,38 @@ class NNUEExporter:
             input_zero_point=0,
         )
 
+    def _verify_quantization(
+        self,
+        layer: nn.Linear,
+        weight_q: np.ndarray,
+        bias_q: np.ndarray,
+        scales: np.ndarray,
+        calibration_data: torch.Tensor,
+        name: str,
+    ):
+        """Verify quantization accuracy on calibration data."""
+        with torch.no_grad():
+            # Original output
+            orig_out = layer(calibration_data).cpu().numpy()
+            
+            # Quantized output
+            quant_out = calibration_data.numpy() @ weight_q.T.astype(np.float32) * scales
+            quant_out += bias_q.astype(np.float32)
+            
+            # Apply ClippedReLU for hidden layers
+            if name in ["feature_transformer", "hidden1", "hidden2"]:
+                quant_out = np.clip(quant_out, 0, 1.0)
+            
+            # Compute error
+            abs_error = np.abs(orig_out - quant_out)
+            max_error = np.max(abs_error)
+            mean_error = np.mean(abs_error)
+            
+            print(f"  {name} quantization: max_error={max_error:.6f}, mean_error={mean_error:.6f}")
+            
+            if max_error > 1e-3:
+                print(f"  WARNING: {name} quantization error high!")
+
     def _write_nnue_file(
         self,
         path: Path,
@@ -153,11 +220,13 @@ class NNUEExporter:
         network_hash: str,
     ):
         with open(path, 'wb') as f:
+            # Header
             f.write(self.MAGIC)
             f.write(struct.pack("<I", self.VERSION))
             f.write(self.FEATURE_SET_HASH)
             f.write(bytes.fromhex(network_hash[:64]))
 
+            # Layers in order: FT, H1, H2, Output
             ft = quantized_layers["feature_transformer"]
             self._write_quantized_layer(f, ft, "feature_transformer")
 
@@ -171,10 +240,17 @@ class NNUEExporter:
             self._write_quantized_layer(f, out, "output")
 
     def _write_quantized_layer(self, f, layer: QuantizedLayer, name: str):
+        # Write dimensions
         f.write(struct.pack("<I", layer.in_features))
         f.write(struct.pack("<I", layer.out_features))
+        
+        # Write weight (int8)
         f.write(layer.weight.tobytes())
+        
+        # Write bias (int32)
         f.write(layer.bias.tobytes())
+        
+        # Write scale (float32)
         f.write(layer.scale.tobytes())
 
     def _write_nnue_float(self, path: Path, model: nn.Module, network_hash: str):
@@ -186,8 +262,8 @@ class NNUEExporter:
 
             ft = model.feature_transformer.linear
             self._write_float_layer(f, ft)
-            self._write_float_layer(f, model.hidden1)
-            self._write_float_layer(f, model.hidden2)
+            self._write_float_layer(f, model.hidden1[0])
+            self._write_float_layer(f, model.hidden2[0])
             self._write_float_layer(f, model.output_layer)
 
     def _write_float_layer(self, f, layer: nn.Linear):
@@ -218,30 +294,107 @@ class NNUEExporter:
         original_model.eval()
         with torch.no_grad():
             original_preds = original_model(test_data).cpu().numpy().squeeze()
-            exported_preds = self._run_exported_inference(nnue_path, test_data)
+            
+            # Use Rust-accelerated verification if available
+            if self._rust_available:
+                exported_preds = self._run_rust_verification(nnue_path, test_data)
+            else:
+                exported_preds = self._run_exported_inference(nnue_path, test_data)
 
         abs_errors = np.abs(original_preds - exported_preds)
         mean_abs_error = float(np.mean(abs_errors))
         max_abs_error = float(np.max(abs_errors))
         rmse = float(np.sqrt(np.mean((original_preds - exported_preds) ** 2)))
 
+        # Percentiles
+        p50 = float(np.percentile(abs_errors, 50))
+        p95 = float(np.percentile(abs_errors, 95))
+        p99 = float(np.percentile(abs_errors, 99))
+
         results = {
             "mean_abs_error_cp": mean_abs_error,
             "max_abs_error_cp": max_abs_error,
             "rmse_cp": rmse,
+            "p50_cp": p50,
+            "p95_cp": p95,
+            "p99_cp": p99,
             "verified": mean_abs_error <= self.verify_tolerance_cp and max_abs_error <= self.verify_max_error_cp,
         }
 
-        print(f"Verification: MAE={mean_abs_error:.4f}cp, Max={max_abs_error:.4f}cp, RMSE={rmse:.4f}cp")
-        print(f"Tolerance: MAE<={self.verify_tolerance_cp}cp, Max<={self.verify_max_error_cp}cp")
-        print(f"Result: {'PASSED' if results['verified'] else 'FAILED'}")
+        print(f"Verification Results:")
+        print(f"  MAE: {mean_abs_error:.6f} cp")
+        print(f"  Max: {max_abs_error:.6f} cp")
+        print(f"  RMSE: {rmse:.6f} cp")
+        print(f"  P50: {p50:.6f} cp, P95: {p95:.6f} cp, P99: {p99:.6f} cp")
+        print(f"  Tolerance: MAE<={self.verify_tolerance_cp}cp, Max<={self.verify_max_error_cp}cp")
+        print(f"  Result: {'PASSED' if results['verified'] else 'FAILED'}")
 
         if not results["verified"]:
             raise RuntimeError(f"Export verification failed: {results}")
 
         return results
 
+    def _run_rust_verification(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:
+        """Use Rust SIMD-accelerated quantized inference for verification."""
+        # Load quantized parameters
+        with open(nnue_path, 'rb') as f:
+            magic = f.read(4)
+            assert magic == b"NNUE"
+            version = struct.unpack("<I", f.read(4))[0]
+            assert version == 1
+            feature_hash = f.read(32)
+            network_hash = f.read(32)
+
+            layers = {}
+            layer_names = ["feature_transformer", "hidden1", "hidden2", "output"]
+            
+            for name in layer_names:
+                in_features = struct.unpack("<I", f.read(4))[0]
+                out_features = struct.unpack("<I", f.read(4))[0]
+                
+                weight = np.frombuffer(f.read(out_features * in_features), dtype=np.int8)
+                weight = weight.reshape(out_features, in_features)
+                
+                bias = np.frombuffer(f.read(out_features * 4), dtype=np.int32)
+                scale = np.frombuffer(f.read(out_features * 4), dtype=np.float32)
+                
+                layers[name] = {
+                    "weight": weight,
+                    "bias": bias,
+                    "scale": scale,
+                    "in_features": in_features,
+                    "out_features": out_features,
+                }
+
+        # Convert to Rust format
+        test_np = test_data.numpy().astype(np.float32)
+        batch_size = test_np.shape[0]
+        
+        # Prepare data for Rust
+        import numpy as np
+        
+        # Call Rust quantized inference
+        rust_nnue = self.RustQuantizedNNUE(
+            ft_weight=layers["feature_transformer"]["weight"],
+            ft_bias=layers["feature_transformer"]["bias"],
+            ft_scale=layers["feature_transformer"]["scale"],
+            h1_weight=layers["hidden1"]["weight"],
+            h1_bias=layers["hidden1"]["bias"],
+            h1_scale=layers["hidden1"]["scale"],
+            h2_weight=layers["hidden2"]["weight"],
+            h2_bias=layers["hidden2"]["bias"],
+            h2_scale=layers["hidden2"]["scale"],
+            out_weight=layers["output"]["weight"],
+            out_bias=layers["output"]["bias"],
+            out_scale=layers["output"]["scale"],
+        )
+        
+        # Forward pass
+        result = rust_nnue.forward(test_np)
+        return np.array(result)
+
     def _run_exported_inference(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:
+        """Pure Python quantized inference (fallback)."""
         with open(nnue_path, 'rb') as f:
             magic = f.read(4)
             assert magic == b"NNUE"
@@ -274,6 +427,7 @@ class NNUEExporter:
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 64, 1280)
         
+        # Feature transformer
         ft = layers["feature_transformer"]
         x_flat = x.reshape(-1, 1280)
         acc = x_flat @ ft.weight.T.astype(np.float32) * ft.scale
@@ -282,16 +436,19 @@ class NNUEExporter:
         x = np.clip(x, 0, 1.0)
         x = x.reshape(batch_size, -1)
         
+        # Hidden1
         h1 = layers["hidden1"]
         acc = x @ h1.weight.T.astype(np.float32) * h1.scale
         acc += h1.bias.astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
+        # Hidden2
         h2 = layers["hidden2"]
         acc = x @ h2.weight.T.astype(np.float32) * h2.scale
         acc += h2.bias.astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
+        # Output
         out = layers["output"]
         acc = x @ out.weight.T.astype(np.float32) * out.scale
         acc += out.bias.astype(np.float32)

@@ -48,6 +48,10 @@ Makefile
 *.a
 *.so
 
+# Rust
+target/
+Cargo.lock
+
 # IDE
 .vscode/
 .idea/

@@ -1,0 +1,223 @@
+# Copyright (C) 2026 Vaibhav
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Ultra-Optimized NNUE Trainer Config for Kaggle 2x T4 (10h)
+# Based on official Stockfish nettest recipes (threats.yaml, testing.yaml)
+# Target: Maximum Elo with HalfKAv2_hm feature set
+
+hardware:
+  gpus: 2
+  num_workers: 16
+  prefetch_factor: 8
+  persistent_workers: true
+  pin_memory: true
+  compile_model: true
+  compile_mode: "max-autotune"
+  fp16: true
+  tf32: true
+  benchmark_cudnn: true
+
+time_budget:
+  hours: 9.5
+  checkpoint_interval_min: 10
+  graceful_shutdown_min: 2
+
+seed: 42
+
+# Data: High-quality Stockfish sources (3500+ Elo, depth 15+)
+# Sources from vondele/nettest: from_kaggle_2_relabel, master-binpacks_relabel, etc.
+data:
+  data_dir: "/kaggle/working/data"
+  max_data_gb: 18
+  num_files_simultaneous: 6
+  shuffle_buffer_mb: 1024
+  drop_last_batch: true
+  # High-quality sources (relabeled with depth 15+ evals)
+  sources:
+    - type: "huggingface"
+      repo_id: "vondele/from_kaggle_2_relabel"
+      pattern: "*.binpack"
+      priority: 1
+      # T60T70wIsRightFarseer - Stockfish self-play at depth 60-70
+    - type: "huggingface"
+      repo_id: "vondele/master-binpacks_relabel"
+      pattern: "*.binpack"
+      priority: 2
+      # nodes5000pv2, multinet, wrongIsRight, dfrc - high quality evals
+    - type: "huggingface"
+      repo_id: "vondele/from_kaggle_1_relabel"
+      pattern: "leela96*.binpack"
+      priority: 3
+      # Leela Chess Zero games (superhuman quality)
+    - type: "huggingface"
+      repo_id: "vondele/linrock_relabel_1"
+      pattern: "*.binpack"
+      priority: 4
+    - type: "huggingface"
+      repo_id: "vondele/linrock_relabel_2"
+      pattern: "*.binpack"
+      priority: 5
+    - type: "huggingface"
+      repo_id: "xushawn/test80-bt4-relabel"
+      pattern: "*.binpack"
+      priority: 6
+    - type: "huggingface"
+      repo_id: "vondele/rescored"
+      pattern: "tb5dtm.binpack"
+      priority: 7
+      # Tablebase-rescored endgame positions (perfect play)
+
+# Model: Optimized for T4 (HalfKAv2_hm ~2.5M params)
+model:
+  feature_set: "HalfKAv2_hm"
+  input_dim: 81920
+  num_buckets: 64
+  features_per_bucket: 1280
+  ft_output: 256
+  hidden1: 256
+  hidden2: 32
+  output_dim: 1
+  # Kaiming initialization for ClippedReLU
+  init_type: "kaiming_normal"
+  init_gain: 1.0
+  # ClippedReLU clamp value
+  clipped_relu_max: 1.0
+
+training:
+  batch_size: 65536
+  micro_batch_size: 8192
+  learning_rate: 0.0008
+  weight_decay: 4e-5
+  wdl_lambda: 0.55
+  eval_delta: 100.0
+  label_smoothing: 0.05
+  max_positions: 55000000000
+
+  # One-Cycle LR Schedule (from nettest)
+  lr_schedule:
+    type: "one_cycle"
+    max_lr: 0.0008
+    total_steps: 5108000
+    warmup_pct: 0.05
+    final_div: 10000.0
+    anneal_strategy: "cos"
+
+  # Lambda schedule (WDL/eval blending) with jitter
+  lambda_schedule:
+    enabled: true
+    start_lambda: 1.0
+    end_lambda: 1.0
+    total_steps: 5052000
+    warmup_pct: 0.25
+    delta: -0.3
+    jitter:
+      enabled: true
+      sample_jitter: 0.0035
+      batch_jitter: 0.0070
+      decay: 0.999
+
+  # Curriculum learning by ply (from nettest)
+  curriculum:
+    enabled: true
+    random_fen_skipping: 3
+    early_fen_skipping: 18
+    soft_early_fen_skipping: 32
+    pc_schedule:
+      y0: -0.20
+      y1: 0.45
+      y2: 1.0
+      y3: 0.95
+      y4: 0.75
+    ply_schedule:
+      x1: 0.0; y1: 0.025
+      x2: 22.0; y2: 0.05
+      x3: 25.5; y3: 0.20
+      x4: 29.5; y4: 0.80
+
+  # Quantile regression parameters
+  qp_asymmetry: 0.22866886710086187
+  pow_exp: 2.4340402395048404
+
+  # Input/Output scaling (from nettest)
+  in_scaling: 295.6539508488627
+  out_scaling: 379.98724077106635
+  in_offset: 285.2706341467852
+  out_offset: 289.1258344152218
+
+  # Gradient clipping
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+checkpoint:
+  dir: "/kaggle/working/checkpoints"
+  keep_last_n: 5
+  keep_best_n: 3
+  save_optimizer: true
+  save_scheduler: true
+  save_scaler: true
+  save_rng: true
+  save_data_state: true
+  atomic_writes: true
+
+hf:
+  repo_id: "sudo-linux-neko/nnue-checkpoints"
+  upload_every_n: 3
+  max_retries: 5
+  backoff_base: 30
+  token_env: "HF_TOKEN"
+
+export:
+  dir: "/kaggle/working/export"
+  quantize: true
+  quantization_method: "per_channel_symmetric"
+  verify: true
+  verify_samples: 20000
+  verify_tolerance_cp: 0.01
+  verify_max_error_cp: 0.5
+  upload_to_hf: true
+
+logging:
+  dir: "/kaggle/working/logs"
+  level: "INFO"
+  log_every_n_steps: 100
+  log_gradients: false
+  log_parameters: false
+  wandb: false
+  tensorboard: true
+
+smoke_test:
+  enabled: false
+  batch_size: 512
+  max_positions: 10000
+  time_budget_hours: 0.05
+  checkpoint_interval_min: 1
+  num_workers: 0
+
+# Advanced features
+advanced:
+  # Data augmentation (board symmetries)
+  augmentations:
+    flip_horizontal: true
+    flip_vertical: true
+    rotate_180: true
+    color_flip: true
+
+  # Mixed precision training
+  amp:
+    enabled: true
+    dtype: "float16"
+
+  # Gradient accumulation (effective batch = micro_batch * accum_steps)
+  gradient_accumulation: 8
+
+  # EMA model for evaluation
+  ema:
+    enabled: true
+    decay: 0.9999
+    update_every: 1
+
+  # Validation
+  validation:
+    enabled: true
+    val_check_interval: 0.05
+    val_batch_size: 32768

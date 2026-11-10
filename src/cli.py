@@ -3,18 +3,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-Main entry point for NNUE Trainer - Optimized for Stockfish on Kaggle.
+Main entry point for Ultra-Optimized NNUE Trainer - Optimized for Stockfish on Kaggle.
 
 Usage:
-    python run.py                    # Full training on Kaggle (optimized)
-    python run.py --smoke-test       # 2-minute pipeline verification
-    python run.py --compile-only     # Only compile C++ loader
-    python run.py --download-data    # Only download training data
-    python run.py --export-only      # Export latest checkpoint to .nnue
-    python run.py --verify-export    # Verify exported net matches PyTorch
-    python run.py --benchmark        # Benchmark throughput (no training)
-
-Rust acceleration (experimental): src/rust_loader/ - requires maturin
+    python run.py --config configs/train_ultra.yaml          # Full training on Kaggle (optimized)
+    python run.py --config configs/train_ultra.yaml --smoke-test       # 2-minute pipeline verification
+    python run.py --config configs/train_ultra.yaml --compile-only     # Only compile C++ loader
+    python run.py --config configs/train_ultra.yaml --download-data  # Only download training data
+    python run.py --config configs/train_ultra.yaml --export-only      # Export latest checkpoint to .nnue
+    python run.py --config configs/train_ultra.yaml --verify-export    # Verify exported net matches PyTorch
+    python run.py --config configs/train_ultra.yaml --benchmark        # Benchmark throughput (no training)
+    python run.py --config configs/train_ultra.yaml --build-rust       # Build Rust loader with maturin
 """
 
 import os
@@ -23,21 +22,23 @@ import argparse
 import yaml
 import time
 import signal
+import random
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import torch
+import numpy as np
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.model import create_model
-from src.data import create_dataloader, compile_cpp_loader, download_training_data, StreamingBinpackDataset
+from src.data import create_dataloader, compile_cpp_loader, download_training_data, StreamingBinpackDataset, DataSource
 from src.train import NNUELightningModule, create_trainer
 from src.checkpoint import CheckpointManager, find_resumable_checkpoint
 from src.hf_upload import create_uploader
 from src.export import create_exporter
-from src.verify import verify_export_standalone
+from src.verify import verify_export_standalone, ExportVerifier
 
 
 def load_config(config_path: str, overrides: dict = None) -> dict:
@@ -64,15 +65,15 @@ def setup_environment(config: dict):
         if dir_path:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
 
+    # PyTorch optimizations
     torch.set_float32_matmul_precision('high')
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
+    # Seeds
     seed = config.get("seed", 42)
     torch.manual_seed(seed)
-    import numpy as np
-    import random
     np.random.seed(seed)
     random.seed(seed)
     if torch.cuda.is_available():
@@ -86,15 +87,61 @@ def compile_only(config: dict) -> int:
     return 0 if success else 1
 
 
+def build_rust(config: dict) -> int:
+    """Build Rust loader with maturin."""
+    print("Building Rust binpack loader with maturin...")
+    rust_dir = Path(__file__).parent / "src" / "rust_loader"
+    
+    try:
+        import subprocess
+        # Check if maturin is available
+        result = subprocess.run(["maturin", "--version"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print("maturin not found. Install with: pip install maturin")
+            return 1
+        
+        # Build in release mode
+        result = subprocess.run(
+            ["maturin", "develop", "--release"],
+            cwd=rust_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"Build failed: {result.stderr}")
+            return 1
+        
+        print("Rust loader built successfully!")
+        return 0
+        
+    except subprocess.TimeoutExpired:
+        print("Build timed out")
+        return 1
+    except FileNotFoundError:
+        print("maturin not found. Install with: pip install maturin")
+        return 1
+    except Exception as e:
+        print(f"Build error: {e}")
+        return 1
+
+
 def download_data(config: dict) -> int:
-    """Download training data."""
-    print("Downloading training data...")
+    """Download training data from high-quality sources."""
+    print("Downloading training data from Stockfish sources...")
     data_dir = Path(config["data"]["data_dir"])
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    sources = [DataSource(**s) for s in config["data"].get("sources", [])]
     files = download_training_data(data_dir, config, max_files=20)
+    
     print(f"Downloaded {len(files)} files")
+    total_gb = 0
     for f in files:
         size_gb = f.stat().st_size / 1024**3
+        total_gb += size_gb
         print(f"  {f.name}: {size_gb:.2f} GB")
+    print(f"Total: {total_gb:.2f} GB")
     return 0
 
 
@@ -105,14 +152,13 @@ def run_benchmark(config: dict) -> int:
     print("=" * 60)
 
     if not compile_cpp_loader():
-        print("WARNING: C++ loader compilation failed")
+        print("WARNING: C++ loader compilation failed, using Python fallback")
 
     data_dir = Path(config["data"]["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
     binpack_files = list(data_dir.glob("*.binpack"))
     if not binpack_files:
         print("No data found, creating dummy data...")
-        from src.data import _create_dummy_binpack
         _create_dummy_binpack(data_dir / "benchmark.binpack", 100000)
 
     model = create_model(config)
@@ -167,7 +213,34 @@ def run_benchmark(config: dict) -> int:
     print(f"  Throughput: {throughput:,.0f} positions/sec")
     print(f"  Per GPU: {throughput / max(1, hw_cfg.get('gpus', 1)):,.0f} positions/sec")
     
+    # Also benchmark export verification
+    print("\nBenchmarking quantized inference...")
+    verifier = ExportVerifier(config)
+    if verifier._rust_available:
+        print("Rust SIMD acceleration: AVAILABLE")
+    else:
+        print("Rust SIMD acceleration: NOT AVAILABLE (using Python fallback)")
+    
     return 0
+
+
+def _create_dummy_binpack(path: Path, num_positions: int):
+    import struct
+    with open(path, 'wb') as f:
+        f.write(b"BINP")
+        f.write(struct.pack("<I", 1))
+        f.write(struct.pack("<Q", num_positions))
+
+        for _ in range(num_positions):
+            num_features = 32
+            f.write(struct.pack("<H", num_features))
+            f.write(struct.pack(f"<{num_features}H", *range(num_features)))
+            f.write(struct.pack(f"<{num_features}f", *[1.0] * num_features))
+            f.write(struct.pack("<3f", 0.3, 0.4, 0.3))
+            f.write(struct.pack("<f", 0.0))
+            f.write(struct.pack("<b", 0))
+
+    print(f"Created dummy binpack: {path} ({num_positions} positions)")
 
 
 def run_smoke_test(config: dict) -> int:
@@ -177,6 +250,7 @@ def run_smoke_test(config: dict) -> int:
     print("=" * 60)
 
     smoke_cfg = config.get("smoke_test", {})
+    # Override config for smoke test
     config["smoke_test"]["enabled"] = True
     config["training"]["batch_size"] = smoke_cfg.get("batch_size", 512)
     config["training"]["max_positions"] = smoke_cfg.get("max_positions", 1000)
@@ -243,38 +317,22 @@ def run_smoke_test(config: dict) -> int:
     return 0
 
 
-def _create_dummy_binpack(path: Path, num_positions: int):
-    import struct
-    with open(path, 'wb') as f:
-        f.write(b"BINP")
-        f.write(struct.pack("<I", 1))
-        f.write(struct.pack("<Q", num_positions))
-
-        for _ in range(num_positions):
-            num_features = 32
-            f.write(struct.pack("<H", num_features))
-            f.write(struct.pack(f"<{num_features}H", *range(num_features)))
-            f.write(struct.pack(f"<{num_features}f", *[1.0] * num_features))
-            f.write(struct.pack("<3f", 0.3, 0.4, 0.3))
-            f.write(struct.pack("<f", 0.0))
-            f.write(struct.pack("<b", 0))
-
-    print(f"Created dummy binpack: {path} ({num_positions} positions)")
-
-
 def run_training(config: dict) -> int:
-    """Run full optimized training."""
+    """Run full ultra-optimized training."""
     print("=" * 60)
-    print("NNUE TRAINER - Optimized Training on 2x T4")
+    print("ULTRA-OPTIMIZED NNUE TRAINER - Stockfish on 2x T4")
     print("=" * 60)
-    print(f"Config: {config.get('config_path', 'configs/train.yaml')}")
+    print(f"Config: {config.get('config_path', 'configs/train_ultra.yaml')}")
     print(f"Time budget: {config['time_budget']['hours']} hours")
     print(f"GPUs: {config['hardware']['gpus']}")
     print(f"Batch size: {config['training']['batch_size']} (global)")
-    print(f"LR: {config['training']['learning_rate']}")
-    print(f"Architecture: FT(256) -> L1(256) -> L2(32) -> Out(1)")
-    print(f"Loss: WDL({config['training']['wdl_lambda']}) + Eval({1-config['training']['wdl_lambda']})")
-    print(f"LR Schedule: Cosine Warm Restarts (T0={config['training'].get('t0', 50000)})")
+    print(f"Micro batch: {config['training']['micro_batch_size']} (accum x{config['advanced']['gradient_accumulation']})")
+    print(f"LR: {config['training']['learning_rate']} (One-Cycle)")
+    print(f"Architecture: FT(256 shared) -> L1(256) -> L2(32) -> Out(1)")
+    print(f"Loss: WDL({config['training']['wdl_lambda']}) + Quantile Eval")
+    print(f"LR Schedule: One-Cycle + Lambda Jitter")
+    print(f"Data: High-quality Stockfish (3500+ Elo, depth 15+)")
+    print(f"EMA: Enabled for evaluation")
 
     print("\n1. Compiling C++ binpack loader...")
     if not compile_cpp_loader():
@@ -286,7 +344,7 @@ def run_training(config: dict) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     binpack_files = list(data_dir.glob("*.binpack"))
     if not binpack_files:
-        print("No binpack files found. Downloading...")
+        print("No binpack files found. Downloading from Stockfish sources...")
         download_training_data(data_dir, config, max_files=10)
         binpack_files = list(data_dir.glob("*.binpack"))
 
@@ -335,7 +393,7 @@ def run_training(config: dict) -> int:
     elapsed = time.time() - start
     print(f"\nTraining completed in {elapsed/3600:.2f} hours")
     print(f"Total steps: {pl_module.training_state.step}")
-    print(f"Final loss: {pl_module.train_losses[-1] if pl_module.train_losses else 'N/A'}")
+    print(f"Final loss: {pl_module.training_state.train_losses[-1] if pl_module.training_state.train_losses else 'N/A'}")
 
     print("\n6. Saving final checkpoint...")
     ckpt_path = checkpoint_manager.save_checkpoint(
@@ -345,19 +403,22 @@ def run_training(config: dict) -> int:
         scaler=getattr(pl_module, 'scaler', None),
         training_state=pl_module.training_state,
         config=config,
+        ema_model=pl_module.ema_model,
+        is_best=True,
     )
 
     if ckpt_path:
         hf_uploader.queue_upload(ckpt_path)
 
-    print("\n7. Exporting final model...")
+    print("\n7. Exporting final model (EMA)...")
     exporter = create_exporter(config)
 
     test_loader = create_dataloader(config, is_train=False)
     test_batch = next(iter(test_loader))
     test_data = test_batch["features"][:100]
 
-    nnue_path = exporter.export(pl_module.model, test_data)
+    # Export EMA model for better playing strength
+    nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
 
     if config.get("export", {}).get("verify", True):
         print("\n8. Verifying export...")
@@ -382,6 +443,7 @@ def run_training(config: dict) -> int:
 
 
 def run_export_only(config: dict) -> int:
+    """Export latest checkpoint to .nnue format."""
     print("Exporting latest checkpoint...")
 
     checkpoint_manager = CheckpointManager(config)
@@ -399,7 +461,7 @@ def run_export_only(config: dict) -> int:
     test_batch = next(iter(test_loader))
     test_data = test_batch["features"][:100]
 
-    nnue_path = exporter.export(model, test_data)
+    nnue_path = exporter.export(model, test_data, use_ema=True)
 
     if config.get("export", {}).get("verify", True):
         result = exporter.verify_export(model, nnue_path, test_data)
@@ -412,6 +474,7 @@ def run_export_only(config: dict) -> int:
 
 
 def run_verify_export(config: dict) -> int:
+    """Verify exported net matches PyTorch."""
     print("Verifying exported net...")
 
     checkpoint_manager = CheckpointManager(config)
@@ -444,11 +507,12 @@ def run_verify_export(config: dict) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NNUE Trainer for Stockfish (Optimized)")
-    parser.add_argument("--config", default="configs/train.yaml", help="Config file path")
+    parser = argparse.ArgumentParser(description="Ultra-Optimized NNUE Trainer for Stockfish")
+    parser.add_argument("--config", default="configs/train_ultra.yaml", help="Config file path")
     parser.add_argument("--smoke-test", action="store_true", help="Run 2-minute smoke test")
     parser.add_argument("--compile-only", action="store_true", help="Only compile C++ loader")
-    parser.add_argument("--download-data", action="store_true", help="Only download data")
+    parser.add_argument("--build-rust", action="store_true", help="Build Rust loader with maturin")
+    parser.add_argument("--download-data", action="store_true", help="Only download training data")
     parser.add_argument("--benchmark", action="store_true", help="Benchmark throughput")
     parser.add_argument("--export-only", action="store_true", help="Export latest checkpoint")
     parser.add_argument("--verify-export", action="store_true", help="Verify exported net")
@@ -489,6 +553,8 @@ def main():
 
     if args.compile_only:
         return compile_only(config)
+    elif args.build_rust:
+        return build_rust(config)
     elif args.download_data:
         return download_data(config)
     elif args.benchmark:
