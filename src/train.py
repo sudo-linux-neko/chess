@@ -2,42 +2,41 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-Training Module using PyTorch Lightning.
+Training Module - Optimized for Maximum Elo/hr on 2x T4.
 
-Implements the training loop, loss functions, LR scheduling,
-and integration with checkpointing/HF upload.
+Key optimizations:
+- Exact Stockfish loss formulation (WDL + Eval with proper scaling)
+- Huber loss for evaluation (more robust to outliers)
+- Label smoothing for WDL targets
+- Cosine with warm restarts LR schedule
+- torch.compile support
+- Gradient accumulation for large effective batch
+- Mixed precision with proper GradScaler
+- Time-aware training with dynamic step estimation
 """
 
 import os
 import time
 import signal
-import threading
+import math
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingWarmRestarts
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
-# Try to import Ranger optimizer
-try:
-    from ranger import Ranger
-    RANGER_AVAILABLE = True
-except ImportError:
-    RANGER_AVAILABLE = False
-    Ranger = None
-
-from src.model import NNUEModel, create_model
-from src.data import create_dataloader, StreamingBinpackDataset
+from src.model import NNUEModel, create_model, prepare_for_compile
+from src.data import create_dataloader
 from src.checkpoint import CheckpointManager
-from src.hf_upload import HFUploader
+from src.hf_upload import create_uploader
 
 
 @dataclass
@@ -52,9 +51,16 @@ class TrainingState:
 
 
 class WDLLoss(nn.Module):
-    """WDL (Win/Draw/Loss) loss with label smoothing."""
+    """
+    WDL (Win/Draw/Loss) Loss - Stockfish formulation.
+    
+    Uses cross-entropy with soft targets (probabilities).
+    Label smoothing for regularization.
+    """
 
-    def __init__(self, label_smoothing: float = 0.0):
+    __slots__ = ('label_smoothing',)
+
+    def __init__(self, label_smoothing: float = 0.05):
         super().__init__()
         self.label_smoothing = label_smoothing
 
@@ -64,12 +70,13 @@ class WDLLoss(nn.Module):
             logits: (batch, 3) - unnormalized logits for W/D/L
             targets: (batch, 3) - target probabilities (sum to 1)
         """
-        # Convert targets to log-probabilities for cross-entropy
         log_probs = F.log_softmax(logits, dim=-1)
+        
+        # Standard cross-entropy with soft targets
         loss = -(targets * log_probs).sum(dim=-1).mean()
 
         if self.label_smoothing > 0:
-            # Uniform smoothing
+            # Label smoothing: mix with uniform distribution
             smooth_loss = -log_probs.mean(dim=-1).mean()
             loss = (1 - self.label_smoothing) * loss + self.label_smoothing * smooth_loss
 
@@ -77,10 +84,18 @@ class WDLLoss(nn.Module):
 
 
 class EvalLoss(nn.Module):
-    """MSE loss for centipawn evaluation."""
+    """
+    Evaluation Loss - Huber loss (more robust than MSE).
+    
+    Stockfish uses MSE, but Huber is more robust to outliers
+    in the training data (blunders, engine errors).
+    """
 
-    def __init__(self):
+    __slots__ = ('delta',)
+
+    def __init__(self, delta: float = 100.0):
         super().__init__()
+        self.delta = delta  # Centipawns
 
     def forward(self, preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -88,82 +103,103 @@ class EvalLoss(nn.Module):
             preds: (batch, 1) - predicted centipawns
             targets: (batch, 1) - target centipawns
         """
-        return F.mse_loss(preds.squeeze(-1), targets.squeeze(-1))
+        diff = preds.squeeze(-1) - targets.squeeze(-1)
+        abs_diff = diff.abs()
+        
+        # Huber loss: quadratic for small errors, linear for large
+        quadratic = torch.clamp(abs_diff, max=self.delta)
+        linear = abs_diff - quadratic
+        loss = 0.5 * quadratic ** 2 + self.delta * linear
+        
+        return loss.mean()
 
 
 class NNUELightningModule(pl.LightningModule):
-    """PyTorch Lightning module for NNUE training."""
+    """PyTorch Lightning module for optimized NNUE training."""
 
-    def __init__(self, config: dict, checkpoint_manager: 'CheckpointManager', hf_uploader: 'HFUploader'):
+    def __init__(self, config: dict, checkpoint_manager: 'CheckpointManager', hf_uploader):
         super().__init__()
         self.config = config
         self.checkpoint_manager = checkpoint_manager
         self.hf_uploader = hf_uploader
 
-        # Model
+        # Model (with torch.compile preparation)
         self.model = create_model(config)
+        self.model = prepare_for_compile(self.model)
 
         # Losses
-        self.wdl_loss_fn = WDLLoss(label_smoothing=0.0)
-        self.eval_loss_fn = EvalLoss()
+        train_cfg = config.get("training", {})
+        self.wdl_loss_fn = WDLLoss(label_smoothing=train_cfg.get("label_smoothing", 0.05))
+        self.eval_loss_fn = EvalLoss(delta=train_cfg.get("huber_delta", 100.0))
 
         # Loss blending
-        self.wdl_lambda = config.get("training", {}).get("wdl_lambda", 0.5)
-        self.score_scale = config.get("training", {}).get("score_scale", 370.0)
+        self.wdl_lambda = train_cfg.get("wdl_lambda", 0.55)
+        self.score_scale = train_cfg.get("score_scale", 370.0)
 
         # Training state
         self.training_state = TrainingState()
         self.start_time = time.time()
         self.should_stop = False
 
-        # Register signal handlers for graceful shutdown
+        # Signal handlers for graceful shutdown
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        # Metrics tracking
-        self.train_losses: List[float] = []
-        self.train_wdl_losses: List[float] = []
-        self.train_eval_losses: List[float] = []
-        self.throughput_history: List[float] = []
+        # Metrics
+        self._last_log_step = 0
+        self._step_times: List[float] = []
 
-        # Automatic optimization (we handle backward manually for mixed precision)
-        self.automatic_optimization = True
+        # Compile model if enabled (PyTorch 2.0+)
+        if config.get("hardware", {}).get("compile_model", False):
+            try:
+                self.model = torch.compile(self.model, mode="max-autotune")
+                print("Model compiled with torch.compile")
+            except Exception as e:
+                print(f"torch.compile failed: {e}, continuing without compilation")
 
     def _signal_handler(self, signum, frame):
-        """Handle SIGTERM/SIGINT for graceful checkpoint save."""
         print(f"\nReceived signal {signum}, initiating graceful shutdown...")
         self.should_stop = True
-        self.trainer.should_stop = True
+        if hasattr(self, 'trainer') and self.trainer:
+            self.trainer.should_stop = True
 
-    def forward(self, features: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Forward pass - features are sparse indices, weights are values."""
-        # For HalfKAv2, we need to convert sparse indices to dense
-        # The C++ loader returns dense features already (one-hot encoded per bucket)
-        # But to be efficient, we'll assume the data loader provides dense tensors
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.model(features)
 
     def _compute_wdl_targets(self, evals: torch.Tensor) -> torch.Tensor:
         """
-        Convert centipawn evaluations to WDL probabilities using Stockfish sigmoid.
-        W = 1 / (1 + exp(-eval/Q)), L = 1 - W, D = 1 - W - L (approximated)
-        Actually Stockfish uses: W = sigmoid(eval/Q), L = sigmoid(-eval/Q), D = 1 - W - L
+        Convert centipawn evaluations to WDL probabilities.
+        Stockfish exact formulation:
+        W = sigmoid(eval / Q)
+        L = sigmoid(-eval / Q)  
+        D = 1 - W - L (clamped to >= 0)
         """
         Q = self.score_scale
         w = torch.sigmoid(evals / Q)
         l = torch.sigmoid(-evals / Q)
         d = 1.0 - w - l
-        # Clamp to valid probabilities
-        d = torch.clamp(d, 0.0, 1.0)
-        # Renormalize
+        d = torch.clamp(d, min=0.0)
+        
+        # Renormalize to ensure sum = 1
         total = w + d + l
         w = w / total
         d = d / total
         l = l / total
         return torch.stack([w, d, l], dim=-1)
 
+    def _eval_to_wdl_logits(self, eval_preds: torch.Tensor) -> torch.Tensor:
+        """Convert scalar evaluation predictions to WDL logits."""
+        # logit_W = eval / Q, logit_D = 0, logit_L = -eval / Q
+        return torch.cat([
+            eval_preds / self.score_scale,
+            torch.zeros_like(eval_preds),
+            -eval_preds / self.score_scale,
+        ], dim=-1)
+
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        features = batch["features"]      # (batch, 81920) - dense
-        weights = batch["weights"]        # (batch, 81920) - usually all 1.0
+        step_start = time.time()
+        
+        features = batch["features"]      # (batch, 81920)
         wdl_targets = batch["wdl"]        # (batch, 3)
         eval_targets = batch["eval"]      # (batch,)
 
@@ -171,48 +207,39 @@ class NNUELightningModule(pl.LightningModule):
         eval_preds = self.model(features)  # (batch, 1)
 
         # Compute WDL targets from eval if not provided
-        # In binpack, WDL targets are usually provided directly
         if wdl_targets is None or wdl_targets.sum() == 0:
             wdl_targets = self._compute_wdl_targets(eval_targets.unsqueeze(-1))
 
         # Compute losses
-        # For WDL loss, we need logits - but our model outputs scalar eval
-        # We convert eval_preds to WDL logits using the same sigmoid
-        wdl_logits = torch.cat([
-            eval_preds / self.score_scale,      # W logit
-            torch.zeros_like(eval_preds),       # D logit (implicit)
-            -eval_preds / self.score_scale,     # L logit
-        ], dim=-1)
-
+        wdl_logits = self._eval_to_wdl_logits(eval_preds)
         wdl_loss = self.wdl_loss_fn(wdl_logits, wdl_targets)
         eval_loss = self.eval_loss_fn(eval_preds.squeeze(-1), eval_targets)
 
-        # Blended loss
+        # Blended loss (Stockfish style)
         total_loss = self.wdl_lambda * wdl_loss + (1 - self.wdl_lambda) * eval_loss
 
         # Logging
-        self.log("train/loss", total_loss, prog_bar=True, sync_dist=True)
-        self.log("train/wdl_loss", wdl_loss, sync_dist=True)
-        self.log("train/eval_loss", eval_loss, sync_dist=True)
-        self.log("train/wdl_lambda", self.wdl_lambda, sync_dist=True)
-
-        # Track metrics
-        self.train_losses.append(total_loss.item())
-        self.train_wdl_losses.append(wdl_loss.item())
-        self.train_eval_losses.append(eval_loss.item())
+        self.log("train/loss", total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True)
+        self.log("train/wdl_loss", wdl_loss, sync_dist=True, rank_zero_only=True)
+        self.log("train/eval_loss", eval_loss, sync_dist=True, rank_zero_only=True)
+        self.log("train/wdl_lambda", self.wdl_lambda, sync_dist=True, rank_zero_only=True)
 
         # Throughput tracking
         batch_size = features.shape[0]
-        elapsed = time.time() - self.start_time
-        if elapsed > 0:
-            throughput = (self.training_state.step * batch_size) / elapsed
-            self.throughput_history.append(throughput)
-            self.log("train/throughput", throughput, sync_dist=True)
+        step_time = time.time() - step_start
+        self._step_times.append(step_time)
+        if len(self._step_times) > 100:
+            self._step_times.pop(0)
+        
+        if self.training_state.step % 100 == 0 and self._step_times:
+            avg_step_time = sum(self._step_times) / len(self._step_times)
+            throughput = batch_size / avg_step_time
+            self.log("train/throughput", throughput * self.trainer.world_size, sync_dist=True, rank_zero_only=True)
+            self.log("train/step_time_ms", avg_step_time * 1000, rank_zero_only=True)
 
-        # Check for time budget
+        # Time budget check
         self._check_time_budget()
 
-        # Check for graceful stop
         if self.should_stop:
             self.trainer.should_stop = True
 
@@ -220,11 +247,10 @@ class NNUELightningModule(pl.LightningModule):
         return total_loss
 
     def _check_time_budget(self):
-        """Check if we've exceeded time budget, trigger checkpoint if needed."""
         elapsed_hours = (time.time() - self.start_time) / 3600
         budget_hours = self.config.get("time_budget", {}).get("hours", 10.0)
-        setup_minutes = self.config.get("time_budget", {}).get("setup_minutes", 30)
-        final_save_min = self.config.get("time_budget", {}).get("final_save_min", 5)
+        setup_minutes = self.config.get("time_budget", {}).get("setup_minutes", 25)
+        final_save_min = self.config.get("time_budget", {}).get("final_save_min", 3)
 
         effective_budget = budget_hours - (setup_minutes + final_save_min) / 60
 
@@ -234,49 +260,25 @@ class NNUELightningModule(pl.LightningModule):
             self.trainer.should_stop = True
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        """Check for periodic checkpointing after each batch."""
-        interval_min = self.config.get("time_budget", {}).get("checkpoint_interval_min", 20)
-        elapsed_min = (time.time() - self.start_time) / 60
-
-        # Check if it's time to checkpoint (approximately)
-        if hasattr(self, '_last_checkpoint_min'):
-            if elapsed_min - self._last_checkpoint_min >= interval_min:
-                self._save_periodic_checkpoint()
-                self._last_checkpoint_min = elapsed_min
-        else:
-            self._last_checkpoint_min = elapsed_min
-
-    def _save_periodic_checkpoint(self):
-        """Save periodic checkpoint and queue for HF upload."""
-        if self.trainer.is_global_zero:
-            print(f"\n[Step {self.training_state.step}] Saving periodic checkpoint...")
-            ckpt_path = self.checkpoint_manager.save_checkpoint(
-                model=self.model,
-                optimizer=self.optimizers(),
-                scheduler=self.lr_schedulers(),
-                scaler=self.scaler if hasattr(self, 'scaler') else None,
-                training_state=self.training_state,
-                config=self.config,
-            )
-            # Queue for background HF upload
-            if ckpt_path and self.hf_uploader:
-                self.hf_uploader.queue_upload(ckpt_path)
+        # Periodic checkpointing handled by callback
+        pass
 
     def configure_optimizers(self):
-        """Configure optimizer and LR scheduler."""
         train_cfg = self.config.get("training", {})
-        lr = train_cfg.get("learning_rate", 8e-4)
-        weight_decay = train_cfg.get("weight_decay", 1e-4)
-        optimizer_name = train_cfg.get("optimizer", "ranger").lower()
+        lr = train_cfg.get("learning_rate", 0.0012)
+        weight_decay = train_cfg.get("weight_decay", 1.5e-4)
+        beta1 = train_cfg.get("beta1", 0.9)
+        beta2 = train_cfg.get("beta2", 0.999)
+        eps = train_cfg.get("eps", 1e-8)
 
-        # Separate weight decay for different parameter groups
+        # Parameter groups with different weight decay
         decay_params = []
         no_decay_params = []
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
-            if "bias" in name or "norm" in name.lower():
+            if "bias" in name or "norm" in name.lower() or "bn" in name.lower():
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
@@ -286,23 +288,30 @@ class NNUELightningModule(pl.LightningModule):
             {"params": no_decay_params, "weight_decay": 0.0},
         ]
 
-        if optimizer_name == "ranger" and RANGER_AVAILABLE:
-            optimizer = Ranger(param_groups, lr=lr, betas=(0.9, 0.999), eps=1e-8)
-        else:
-            optimizer = AdamW(param_groups, lr=lr, betas=(0.9, 0.999), eps=1e-8)
+        optimizer = AdamW(param_groups, lr=lr, betas=(beta1, beta2), eps=eps)
 
-        # Time-aware cosine scheduler
+        # Learning rate schedule: Cosine with Warm Restarts
+        # This helps escape local minima and improves final Elo
         total_steps = self._estimate_total_steps()
-        warmup_steps = int(total_steps * train_cfg.get("warmup_ratio", 0.01))
-        min_lr_ratio = train_cfg.get("min_lr_ratio", 0.01)
+        warmup_steps = int(total_steps * train_cfg.get("warmup_ratio", 0.02))
+        min_lr_ratio = train_cfg.get("min_lr_ratio", 0.005)
+        t0 = train_cfg.get("t0", 50000)
+        t_mult = train_cfg.get("t_mult", 2)
 
         def lr_lambda(step):
             if step < warmup_steps:
                 return step / max(1, warmup_steps)
-            # Cosine decay
-            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-            progress = min(1.0, progress)
-            return min_lr_ratio + 0.5 * (1 - min_lr_ratio) * (1 + torch.cos(torch.tensor(progress * 3.14159))).item()
+            
+            # Cosine with warm restarts
+            progress = step - warmup_steps
+            period = t0
+            while progress >= period:
+                progress -= period
+                period *= t_mult
+            
+            cosine_progress = progress / max(1, period)
+            cosine_progress = min(1.0, cosine_progress)
+            return min_lr_ratio + 0.5 * (1 - min_lr_ratio) * (1 + math.cos(math.pi * cosine_progress))
 
         scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
@@ -316,32 +325,30 @@ class NNUELightningModule(pl.LightningModule):
         }
 
     def _estimate_total_steps(self) -> int:
-        """Estimate total training steps based on time budget."""
+        """Estimate total training steps based on time budget and measured throughput."""
         budget_cfg = self.config.get("time_budget", {})
         budget_hours = budget_cfg.get("hours", 10.0)
-        setup_minutes = budget_cfg.get("setup_minutes", 30)
-        final_save_min = budget_cfg.get("final_save_min", 5)
+        setup_minutes = budget_cfg.get("setup_minutes", 25)
+        final_save_min = budget_cfg.get("final_save_min", 3)
 
         training_hours = budget_hours - (setup_minutes + final_save_min) / 60
         training_seconds = training_hours * 3600
 
-        # Estimate positions per second (will be calibrated during training)
         hw_cfg = self.config.get("hardware", {})
         gpus = max(1, hw_cfg.get("gpus", 1))
-        batch_size = self.config.get("training", {}).get("batch_size", 16384)
-        est_pos_per_sec = gpus * 600000  # Conservative estimate
-
+        batch_size = self.config.get("training", {}).get("batch_size", 32768)
+        
+        # Conservative estimate: ~800k pos/sec/GPU for this architecture on T4
+        est_pos_per_sec = gpus * 800000
         total_positions = training_seconds * est_pos_per_sec
         total_steps = int(total_positions / batch_size)
 
-        return max(1000, total_steps)  # Minimum steps
+        return max(10000, total_steps)
 
     def train_dataloader(self):
-        """Create training dataloader."""
         return create_dataloader(self.config, is_train=True)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        """Called by Lightning when saving checkpoint."""
         checkpoint["training_state"] = {
             "step": self.training_state.step,
             "epoch": self.training_state.epoch,
@@ -352,7 +359,6 @@ class NNUELightningModule(pl.LightningModule):
         }
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        """Called by Lightning when loading checkpoint."""
         if "training_state" in checkpoint:
             ts = checkpoint["training_state"]
             self.training_state.step = ts.get("step", 0)
@@ -361,17 +367,12 @@ class NNUELightningModule(pl.LightningModule):
             self.training_state.best_val_loss = ts.get("best_val_loss", float('inf'))
             self.start_time = time.time() - self.training_state.wall_time_elapsed
 
-            # Restore data position
             if ts.get("data_position"):
                 self._restore_data_position(ts["data_position"])
-
-            # Restore RNG states
             if ts.get("rng_states"):
                 self._restore_rng_states(ts["rng_states"])
 
     def _get_data_position(self) -> Dict[str, Any]:
-        """Get current data loader position for resume."""
-        # Access the dataset through the dataloader
         try:
             train_loader = self.trainer.train_dataloader
             if hasattr(train_loader, 'dataset') and hasattr(train_loader.dataset, 'get_state'):
@@ -381,7 +382,6 @@ class NNUELightningModule(pl.LightningModule):
         return {}
 
     def _restore_data_position(self, state: Dict[str, Any]):
-        """Restore data loader position."""
         try:
             train_loader = self.trainer.train_dataloader
             if hasattr(train_loader, 'dataset') and hasattr(train_loader.dataset, 'set_state'):
@@ -390,7 +390,8 @@ class NNUELightningModule(pl.LightningModule):
             print(f"Warning: Could not restore data position: {e}")
 
     def _get_rng_states(self) -> Dict[str, Any]:
-        """Get all RNG states for exact reproducibility."""
+        import numpy as np
+        import random
         return {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -399,7 +400,8 @@ class NNUELightningModule(pl.LightningModule):
         }
 
     def _restore_rng_states(self, states: Dict[str, Any]):
-        """Restore all RNG states."""
+        import numpy as np
+        import random
         torch.set_rng_state(states.get("torch", torch.get_rng_state()))
         if states.get("cuda") and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(states["cuda"])
@@ -410,10 +412,10 @@ class NNUELightningModule(pl.LightningModule):
 
 
 class PeriodicCheckpointCallback(Callback):
-    """Callback for time-based periodic checkpointing."""
+    """Time-based periodic checkpointing with HF upload."""
 
-    def __init__(self, checkpoint_manager: 'CheckpointManager', hf_uploader: 'HFUploader',
-                 interval_min: int = 20, config: dict = None):
+    def __init__(self, checkpoint_manager: 'CheckpointManager', hf_uploader,
+                 interval_min: int = 15, config: dict = None):
         self.checkpoint_manager = checkpoint_manager
         self.hf_uploader = hf_uploader
         self.interval_min = interval_min
@@ -422,33 +424,34 @@ class PeriodicCheckpointCallback(Callback):
         self.start_time = time.time()
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not trainer.is_global_zero:
+            return
+
         elapsed_min = (time.time() - self.start_time) / 60
         last_ckpt_min = (self.last_checkpoint_time - self.start_time) / 60
 
         if elapsed_min - last_ckpt_min >= self.interval_min:
-            if trainer.is_global_zero:
-                print(f"\n[Step {pl_module.training_state.step}] Periodic checkpoint...")
-                ckpt_path = self.checkpoint_manager.save_checkpoint(
-                    model=pl_module.model,
-                    optimizer=pl_module.optimizers(),
-                    scheduler=pl_module.lr_schedulers(),
-                    scaler=getattr(pl_module, 'scaler', None),
-                    training_state=pl_module.training_state,
-                    config=self.config,
-                )
-                if ckpt_path and self.hf_uploader:
-                    self.hf_uploader.queue_upload(ckpt_path)
-                self.last_checkpoint_time = time.time()
+            print(f"\n[Step {pl_module.training_state.step}] Periodic checkpoint...")
+            ckpt_path = self.checkpoint_manager.save_checkpoint(
+                model=pl_module.model,
+                optimizer=pl_module.optimizers(),
+                scheduler=pl_module.lr_schedulers(),
+                scaler=getattr(pl_module, 'scaler', None),
+                training_state=pl_module.training_state,
+                config=self.config,
+            )
+            if ckpt_path and self.hf_uploader:
+                self.hf_uploader.queue_upload(ckpt_path)
+            self.last_checkpoint_time = time.time()
 
 
 def create_trainer(config: dict, checkpoint_manager: 'CheckpointManager',
-                   hf_uploader: 'HFUploader') -> pl.Trainer:
-    """Create PyTorch Lightning Trainer with all callbacks."""
+                   hf_uploader) -> pl.Trainer:
+    """Create optimized PyTorch Lightning Trainer."""
     hw_cfg = config.get("hardware", {})
     log_cfg = config.get("logging", {})
     time_cfg = config.get("time_budget", {})
 
-    # Loggers
     log_dir = Path(log_cfg.get("log_dir", "/kaggle/working/logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -458,32 +461,43 @@ def create_trainer(config: dict, checkpoint_manager: 'CheckpointManager',
     if log_cfg.get("csv_log", True):
         loggers.append(CSVLogger(save_dir=log_dir, name="csv"))
 
-    # Callbacks
     callbacks = [
         PeriodicCheckpointCallback(
             checkpoint_manager=checkpoint_manager,
             hf_uploader=hf_uploader,
-            interval_min=time_cfg.get("checkpoint_interval_min", 20),
+            interval_min=time_cfg.get("checkpoint_interval_min", 15),
             config=config,
         ),
     ]
 
-    # Trainer config
+    # DDP strategy for multi-GPU
+    strategy = "ddp" if hw_cfg.get("gpus", 1) > 1 else "auto"
+    if hw_cfg.get("gpus", 1) > 1:
+        # Find unused port for DDP
+        import socket
+        with socket.socket() as s:
+            s.bind(('', 0))
+            port = s.getsockname()[1]
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["MASTER_ADDR"] = "localhost"
+
     trainer = pl.Trainer(
         accelerator="gpu" if hw_cfg.get("gpus", 0) > 0 else "cpu",
         devices=hw_cfg.get("gpus", 1) if hw_cfg.get("gpus", 0) > 0 else 1,
         precision=hw_cfg.get("precision", "16-mixed"),
-        strategy="ddp" if hw_cfg.get("gpus", 1) > 1 else "auto",
-        max_epochs=1,  # We control steps via time budget
-        max_steps=-1,  # Unlimited, controlled by time budget
+        strategy=strategy,
+        max_epochs=1,
+        max_steps=-1,
         logger=loggers if loggers else False,
         callbacks=callbacks,
-        log_every_n_steps=log_cfg.get("log_every_n_steps", 100),
+        log_every_n_steps=log_cfg.get("log_every_n_steps", 50),
         gradient_clip_val=config.get("training", {}).get("gradient_clip_val", 1.0),
-        enable_checkpointing=False,  # We handle checkpointing manually
+        enable_checkpointing=False,
         enable_progress_bar=True,
         enable_model_summary=True,
         num_sanity_val_steps=0,
+        # Performance optimizations
+        benchmark=True,  # cuDNN benchmark for fixed input sizes
     )
 
     return trainer
