@@ -1096,17 +1096,22 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
 
                 print(f"  Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
                 # Use local_dir only (no cache_dir to avoid conflicts and 2x disk usage)
-                local_path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    repo_type="dataset",
-                    local_dir=str(data_dir),
-                    force_download=False,
-                )
-                downloaded.append(Path(local_path))
-                file_size = Path(local_path).stat().st_size
-                total_size += file_size
-                print(f"  Downloaded: {filename} ({file_size / 1024**3:.2f}GB)")
+                try:
+                    local_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        repo_type="dataset",
+                        local_dir=str(data_dir),
+                        force_download=False,
+                    )
+                    downloaded.append(Path(local_path))
+                    file_size = Path(local_path).stat().st_size
+                    total_size += file_size
+                    print(f"  Downloaded: {filename} ({file_size / 1024**3:.2f}GB)")
+                except Exception as e:
+                    # Skip missing/404 files gracefully - try next file
+                    print(f"  Skipping {filename} (not found: {e})")
+                    continue
 
             return downloaded
         
@@ -1325,7 +1330,7 @@ struct BinpackDataset::Impl {
 BinpackDataset::BinpackDataset(const std::string& filepath) : pimpl_(std::make_unique<Impl>(filepath)) {}
 BinpackDataset::~BinpackDataset() = default;
 size_t BinpackDataset::size() const { return pimpl_->num_positions; }
-BinpackDataset::Position BinpackDataset::operator[](size_t idx) const { return pimpl_->read_position(idx); }
+Position BinpackDataset::operator[](size_t idx) const { return pimpl_->read_position(idx); }
 }
 ''')
     (cpp_loader_dir / "src" / "bindings.cpp").write_text('''
@@ -1376,27 +1381,52 @@ def create_dataloader(
         sources = [DataSource(**s) for s in data_cfg.get("sources", [])]
         
         if use_streaming and streaming_manager is not None:
-            # Use streaming manager's active files
+            # Use streaming manager's active files - wait for background downloader
             active_files = streaming_manager.get_active_files()
-            if not active_files:
-                raise RuntimeError("No active files available from streaming manager")
+            wait_seconds = 0
+            max_wait = 120  # Wait up to 2 minutes for first file
+            while not active_files and wait_seconds < max_wait:
+                print(f"  Waiting for background downloader... ({wait_seconds}s/{max_wait}s)")
+                time.sleep(10)
+                wait_seconds += 10
+                active_files = streaming_manager.get_active_files()
             
-            # Create a custom dataset that uses the streaming manager's files
-            dataset = StreamingBinpackDataset(
-                data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
-                sources=sources,
-                max_files=len(active_files),
-                shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
-                seed=config.get("seed", 42),
-                drop_last_batch=data_cfg.get("drop_last_batch", True),
-                curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
-                augmentations=adv_cfg.get("augmentations", {}),
-                streaming_manager=streaming_manager,  # Pass for predictive prefetching
-                config=config,  # Pass config for curriculum settings
-            )
-            # Override file discovery to use streaming manager's active files
-            dataset.files = active_files
-            print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
+            if not active_files:
+                # Fall back: try non-streaming mode with existing files
+                print("  WARNING: No files from streaming manager, trying non-streaming fallback...")
+                binpack_files = list(Path(data_cfg.get("data_dir", "/kaggle/working/data")).glob("*.binpack"))
+                if binpack_files:
+                    print(f"  Found {len(binpack_files)} existing files, using non-streaming mode")
+                    dataset = StreamingBinpackDataset(
+                        data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
+                        sources=sources,
+                        max_files=min(len(binpack_files), data_cfg.get("num_files_simultaneous", 6)),
+                        shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
+                        seed=config.get("seed", 42),
+                        drop_last_batch=data_cfg.get("drop_last_batch", True),
+                        curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
+                        augmentations=adv_cfg.get("augmentations", {}),
+                        config=config,
+                    )
+                else:
+                    raise RuntimeError("No .binpack files found anywhere - cannot start training")
+            else:
+                # Create a custom dataset that uses the streaming manager's files
+                dataset = StreamingBinpackDataset(
+                    data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
+                    sources=sources,
+                    max_files=len(active_files),
+                    shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
+                    seed=config.get("seed", 42),
+                    drop_last_batch=data_cfg.get("drop_last_batch", True),
+                    curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
+                    augmentations=adv_cfg.get("augmentations", {}),
+                    streaming_manager=streaming_manager,  # Pass for predictive prefetching
+                    config=config,  # Pass config for curriculum settings
+                )
+                # Override file discovery to use streaming manager's active files
+                dataset.files = active_files
+                print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
         else:
             dataset = StreamingBinpackDataset(
                 data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
