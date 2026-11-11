@@ -172,8 +172,9 @@ class NNUEExporter:
         weight_q = np.round(weight / scales[:, np.newaxis]).astype(np.int8)
         weight_q = np.clip(weight_q, -128, 127)
 
-        # Quantize bias (scale matches weight scale)
-        bias_q = np.round(bias / scales).astype(np.int32)
+        # Quantize bias (Stockfish-compatible: stored as int32, added directly without scale)
+        # Stockfish .nnue format: output = x @ weight_q.T * scales + bias_q
+        bias_q = np.round(bias).astype(np.int32)
 
         # Verify quantization accuracy if calibration data provided
         if calibration_data is not None:
@@ -200,7 +201,7 @@ class NNUEExporter:
             # Original output
             orig_out = layer(calibration_data).cpu().numpy()
             
-            # Quantized output
+            # Quantized output (Stockfish-compatible: bias added directly, not scaled)
             quant_out = calibration_data.numpy() @ weight_q.T.astype(np.float32) * scales
             quant_out += bias_q.astype(np.float32)
             

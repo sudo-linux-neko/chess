@@ -171,12 +171,15 @@ class StreamingBinpackDataset(IterableDataset):
         indices = list(range(start_pos, num_positions))
         
         if self.curriculum_enabled:
-            # Weight positions by ply (prefer mid/late game)
-            # We'll do a simple skip of early positions
-            curriculum_cfg = self.config.get("training", {}).get("curriculum", {}) if hasattr(self, 'config') else {}
+            # Curriculum: skip early game positions
+            # early_fen_skipping=18 means skip positions with ply < 18
+            # Without ply info in binpack data, approximate by skipping
+            # first (early_fen_skip / max_ply) fraction of positions
+            curriculum_cfg = self.config.get("training", {}).get("curriculum", {})
             early_fen_skip = curriculum_cfg.get("early_fen_skip", 18)
-            # For now, just skip first N% of positions as "early game"
-            skip_count = int(len(indices) * 0.1)  # Skip first 10%
+            max_ply = curriculum_cfg.get("max_ply", 64)
+            skip_fraction = min(1.0, early_fen_skip / max_ply)
+            skip_count = int(len(indices) * skip_fraction)
             indices = indices[skip_count:]
 
         chunk_size = min(self.shuffle_buffer_size, len(indices))
@@ -223,7 +226,11 @@ class StreamingBinpackDataset(IterableDataset):
                 
                 # Curriculum: skip early game
                 if self.curriculum_enabled:
-                    skip_count = int(len(indices) * 0.1)
+                    curriculum_cfg = self.config.get("training", {}).get("curriculum", {})
+                    early_fen_skip = curriculum_cfg.get("early_fen_skip", 18)
+                    max_ply = curriculum_cfg.get("max_ply", 64)
+                    skip_fraction = min(1.0, early_fen_skip / max_ply)
+                    skip_count = int(len(indices) * skip_fraction)
                     indices = indices[skip_count:]
                 
                 chunk_size = min(self.shuffle_buffer_size, len(indices))

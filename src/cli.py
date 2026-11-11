@@ -389,13 +389,19 @@ def run_training(config: dict) -> int:
 
     if resume_ckpt:
         print(f"Resuming from: {resume_ckpt}")
+        # Load checkpoint into pl_module.model (not a separate model variable)
         checkpoint_manager.load_checkpoint(
             resume_ckpt,
-            model=model,
-            optimizer=None,
-            scheduler=None,
-            scaler=None,
+            model=pl_module.model,
+            optimizer=pl_module.optimizers(),
+            scheduler=pl_module.lr_schedulers(),
+            scaler=None,  # Scaler restored by PL automatically
+            training_state=pl_module.training_state,
+            ema_model=pl_module.ema_model,
         )
+        # Sync EMA model with loaded weights
+        if pl_module.ema_model is not None:
+            pl_module.ema_model.load_state_dict(pl_module.model.state_dict())
 
     # Create trainer with streaming manager
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
@@ -435,7 +441,7 @@ def run_training(config: dict) -> int:
         model=pl_module.model,
         optimizer=pl_module.optimizers(),
         scheduler=pl_module.lr_schedulers(),
-        scaler=getattr(pl_module, 'scaler', None),
+        scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
         training_state=pl_module.training_state,
         config=config,
         ema_model=pl_module.ema_model,
@@ -448,7 +454,7 @@ def run_training(config: dict) -> int:
     print("\n7. Exporting final model (EMA)...")
     exporter = create_exporter(config)
 
-    test_loader = create_dataloader(config, is_train=False)
+    test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
     test_batch = next(iter(test_loader))
     test_data = test_batch["features"][:100]
 

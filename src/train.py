@@ -249,6 +249,10 @@ class NNUELightningModule(pl.LightningModule):
         # Combined loss
         loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         
+        # Scale loss for gradient accumulation (PL does NOT auto-scale)
+        # Without this, effective LR is accum_steps x too high
+        loss = loss / self.accum_steps
+        
         # Check for NaN/Inf
         if not torch.isfinite(loss):
             print(f"WARNING: Non-finite loss detected: {loss.item()}")
@@ -452,10 +456,9 @@ class NNUELightningModule(pl.LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         """Log learning rate before optimizer step."""
-        # Log current LR for progress bar
-        if self.trainer.global_step % self.accum_steps == 0:
-            lr = optimizer.param_groups[0]['lr']
-            self.log("lr", lr, prog_bar=True, sync_dist=True)
+        # Log current LR for progress bar (every optimizer step)
+        lr = optimizer.param_groups[0]['lr']
+        self.log("lr", lr, prog_bar=True, sync_dist=True)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         """Save custom state."""

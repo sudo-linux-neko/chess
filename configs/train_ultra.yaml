@@ -133,6 +133,7 @@ training:
     random_fen_skipping: 3
     early_fen_skipping: 18
     soft_early_fen_skipping: 32
+    max_ply: 64
     pc_schedule:
       y0: -0.20
       y1: 0.45
