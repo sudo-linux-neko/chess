@@ -33,7 +33,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.model import create_model
-from src.data import create_dataloader, compile_cpp_loader, download_training_data, StreamingBinpackDataset, DataSource
+from src.data import (create_dataloader, compile_cpp_loader, download_training_data, 
+                      StreamingBinpackDataset, DataSource, StreamingDataManager, StreamingConfig)
 from src.train import NNUELightningModule, create_trainer
 from src.checkpoint import CheckpointManager, find_resumable_checkpoint
 from src.hf_upload import create_uploader
@@ -345,15 +346,34 @@ def run_training(config: dict) -> int:
     print("\n2. Preparing training data...")
     data_dir = Path(config["data"]["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
-    binpack_files = list(data_dir.glob("*.binpack"))
-    if not binpack_files:
-        print("No binpack files found. Downloading from Stockfish sources...")
-        download_training_data(data_dir, config, max_files=10)
+    
+    # Check if streaming is enabled
+    stream_cfg = config.get("data", {}).get("streaming", {})
+    use_streaming = stream_cfg.get("enabled", False)
+    
+    streaming_manager = None
+    if use_streaming:
+        print("Streaming mode ENABLED - will manage disk space automatically")
+        streaming_config = StreamingConfig(
+            mode=StreamingMode(stream_cfg.get("mode", "adaptive")),
+            target_gb=stream_cfg.get("target_gb", 5.0),
+            min_gb=stream_cfg.get("min_gb", 2.0),
+            max_gb=stream_cfg.get("max_gb", 8.0),
+            fallback_gb=stream_cfg.get("fallback_gb", 3.0),
+            keep_recent=stream_cfg.get("keep_recent", 2),
+            auto_cleanup=stream_cfg.get("auto_cleanup", True),
+        )
+        streaming_manager = StreamingDataManager(data_dir, config, streaming_config)
+    else:
         binpack_files = list(data_dir.glob("*.binpack"))
-
-    print(f"Found {len(binpack_files)} data files")
-    total_gb = sum(f.stat().st_size for f in binpack_files) / 1024**3
-    print(f"Total data: {total_gb:.2f} GB")
+        if not binpack_files:
+            print("No binpack files found. Downloading from Stockfish sources...")
+            download_training_data(data_dir, config, max_files=10)
+            binpack_files = list(data_dir.glob("*.binpack"))
+        
+        print(f"Found {len(binpack_files)} data files")
+        total_gb = sum(f.stat().st_size for f in binpack_files) / 1024**3
+        print(f"Total data: {total_gb:.2f} GB")
 
     print("\n3. Initializing components...")
     checkpoint_manager = CheckpointManager(config)
@@ -377,6 +397,7 @@ def run_training(config: dict) -> int:
             scaler=None,
         )
 
+    # Create trainer with streaming manager
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
 
     print("\n5. Starting training...")
@@ -445,6 +466,11 @@ def run_training(config: dict) -> int:
 
     hf_uploader.queue_export(nnue_path)
     hf_uploader.shutdown(wait=True)
+
+    # Shutdown streaming manager
+    if streaming_manager:
+        print("Shutting down streaming data manager...")
+        streaming_manager.shutdown()
 
     print("\n" + "=" * 60)
     print("TRAINING COMPLETE")

@@ -25,10 +25,11 @@ import subprocess
 import urllib.request
 import shutil
 from pathlib import Path
-from typing import Iterator, Optional, List, Tuple, Dict, Any, Union
+from typing import Iterator, Optional, List, Tuple, Dict, Any, Union, Callable
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
+from enum import Enum
 
 import torch
 import torch.multiprocessing as mp
@@ -481,6 +482,326 @@ def clean_hf_cache(cache_dir: Path = None):
             print(f"Cache cleanup error: {e}")
 
 
+class StreamingMode(Enum):
+    """Streaming strategy for data management."""
+    FIXED_WINDOW = "fixed_window"      # Keep N GB window, rotate files
+    ADAPTIVE = "adaptive"              # Adjust based on available space
+    ALL_AT_ONCE = "all_at_once"        # Traditional: download all
+
+
+@dataclass
+class StreamingConfig:
+    """Configuration for streaming data management."""
+    mode: StreamingMode = StreamingMode.ADAPTIVE
+    target_gb: float = 5.0             # Target data to keep on disk
+    min_gb: float = 2.0                # Minimum before emergency cleanup
+    max_gb: float = 8.0                # Maximum before forced rotation
+    fallback_gb: float = 3.0           # Fallback if space critical
+    keep_recent: int = 2               # Number of recent files to never delete
+    auto_cleanup: bool = True          # Auto-delete old files
+    cache_dir: Optional[Path] = None   # Separate cache dir
+
+
+class StreamingDataManager:
+    """
+    Manages streaming data download/rotation during training.
+    
+    Features:
+    - Keeps only target_gb of data on disk at any time
+    - Downloads next files in background while training
+    - Auto-cleans old files when space low
+    - Falls back to smaller chunks on disk pressure
+    - Thread-safe for multi-worker training
+    """
+    
+    def __init__(
+        self,
+        data_dir: Path,
+        config: dict,
+        streaming_config: Optional[StreamingConfig] = None,
+    ):
+        self.data_dir = Path(data_dir)
+        self.config = config
+        self.stream_cfg = streaming_config or StreamingConfig()
+        self.data_cfg = config.get("data", {})
+        self.sources = [DataSource(**s) for s in self.data_cfg.get("sources", [])]
+        
+        # State
+        self._all_files: List[Path] = []          # All available files (downloaded + to-download)
+        self._active_files: List[Path] = []       # Currently on disk
+        self._downloaded_files: set = set()       # Files ever downloaded
+        self._lock = threading.RLock()
+        self._download_queue: deque = deque()
+        self._download_thread: Optional[threading.Thread] = None
+        self._stop_download = threading.Event()
+        self._download_errors: List[str] = []
+        
+        # Discover all potential files from HF (without downloading)
+        self._discover_all_files()
+        
+        # Initial download to fill target_gb
+        self._ensure_initial_data()
+        
+        # Start background downloader
+        if self.stream_cfg.auto_cleanup:
+            self._start_background_downloader()
+    
+    def _discover_all_files(self):
+        """List all available files from HF sources without downloading."""
+        print("Discovering available training files...")
+        for source in self.sources:
+            if source.type != "huggingface":
+                continue
+            try:
+                from huggingface_hub import list_repo_files
+                files = list_repo_files(repo_id=source.repo_id, repo_type="dataset")
+                binpack_files = [f for f in files if f.endswith(".binpack")]
+                binpack_files.sort()
+                
+                # Limit per source
+                binpack_files = binpack_files[:source.max_files]
+                
+                for filename in binpack_files:
+                    filepath = self.data_dir / filename
+                    self._all_files.append(filepath)
+                    if filepath.exists():
+                        self._downloaded_files.add(filepath)
+                        self._active_files.append(filepath)
+                
+                print(f"  {source.repo_id}: {len(binpack_files)} files available")
+            except Exception as e:
+                print(f"  Failed to list {source.repo_id}: {e}")
+        
+        print(f"Total available files: {len(self._all_files)}")
+        print(f"Already downloaded: {len(self._downloaded_files)}")
+    
+    def _get_active_size_gb(self) -> float:
+        """Get total size of active files in GB."""
+        with self._lock:
+            total = sum(f.stat().st_size for f in self._active_files if f.exists())
+            return total / 1024**3
+    
+    def _ensure_initial_data(self):
+        """Download initial batch to reach target_gb."""
+        target = self.stream_cfg.target_gb
+        current = self._get_active_size_gb()
+        
+        if current >= target:
+            print(f"Already have {current:.1f}GB active data (target: {target}GB)")
+            return
+        
+        needed = target - current
+        print(f"Downloading initial data: need {needed:.1f}GB more...")
+        
+        # Sort by priority, download until target reached
+        priority_files = sorted(
+            [f for f in self._all_files if f not in self._downloaded_files],
+            key=lambda f: next((s.priority for s in self.sources if f.name in str(s.pattern)), 999)
+        )
+        
+        for filepath in priority_files:
+            if self._get_active_size_gb() >= target:
+                break
+            self._download_file(filepath)
+    
+    def _download_file(self, filepath: Path) -> bool:
+        """Download a single file with space management."""
+        with self._lock:
+            if filepath in self._downloaded_files:
+                return True
+        
+        # Check space before download
+        if not self._ensure_space_for_download(filepath):
+            return False
+        
+        # Find source for this file
+        source = None
+        for s in self.sources:
+            if filepath.name in str(s.pattern) or filepath.match(s.pattern):
+                source = s
+                break
+        
+        if not source:
+            print(f"No source found for {filepath.name}")
+            return False
+        
+        print(f"Downloading {filepath.name} ({source.repo_id})...")
+        
+        try:
+            from huggingface_hub import hf_hub_download
+            local_path = hf_hub_download(
+                repo_id=source.repo_id,
+                filename=filepath.name,
+                repo_type="dataset",
+                local_dir=str(self.data_dir),
+                local_dir_use_symlinks=False,
+                cache_dir=str(self.data_dir),
+            )
+            
+            with self._lock:
+                self._downloaded_files.add(Path(local_path))
+                self._active_files.append(Path(local_path))
+            
+            size_gb = Path(local_path).stat().st_size / 1024**3
+            print(f"Downloaded: {filepath.name} ({size_gb:.2f}GB)")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to download {filepath.name}: {e}")
+            with self._lock:
+                self._download_errors.append(f"{filepath.name}: {e}")
+            return False
+    
+    def _ensure_space_for_download(self, filepath: Path) -> bool:
+        """Ensure enough space for download, cleanup if needed."""
+        required = 5.0  # Estimate 5GB per file
+        
+        # Check current free space
+        try:
+            stat = shutil.disk_usage(self.data_dir)
+            free_gb = stat.free / 1024**3
+            
+            if free_gb > required + 2:  # 2GB buffer
+                return True
+            
+            print(f"Low space: {free_gb:.1f}GB free, need {required}GB for {filepath.name}")
+            
+            # Try cleanup
+            if self._cleanup_old_files(required + 2):
+                return True
+            
+            # Fallback: try with smaller target
+            print(f"Falling back to {self.stream_cfg.fallback_gb}GB target...")
+            self.stream_cfg.target_gb = self.stream_cfg.fallback_gb
+            self._cleanup_old_files(self.stream_cfg.fallback_gb + 2)
+            
+            stat = shutil.disk_usage(self.data_dir)
+            free_gb = stat.free / 1024**3
+            return free_gb > required
+            
+        except Exception as e:
+            print(f"Space check failed: {e}")
+            return True  # Assume OK
+    
+    def _cleanup_old_files(self, target_free_gb: float) -> bool:
+        """Delete oldest files to free space, keeping recent ones."""
+        with self._lock:
+            # Sort by modification time (oldest first)
+            deletable = sorted(
+                [f for f in self._active_files if f.exists()],
+                key=lambda f: f.stat().st_mtime
+            )
+            
+            # Keep recent files
+            keep_count = self.stream_cfg.keep_recent
+            deletable = deletable[:-keep_count] if len(deletable) > keep_count else []
+            
+            if not deletable:
+                print("No files to delete (keeping recent)")
+                return False
+            
+            freed = 0
+            for f in deletable:
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    self._active_files.remove(f)
+                    freed += size
+                    print(f"  Deleted: {f.name} ({size/1024**3:.2f}GB)")
+                    
+                    if freed / 1024**3 >= target_free_gb:
+                        break
+                except Exception as e:
+                    print(f"  Failed to delete {f.name}: {e}")
+            
+            print(f"Freed {freed/1024**3:.2f}GB")
+            return freed > 0
+    
+    def _start_background_downloader(self):
+        """Start background thread to download next files."""
+        self._download_thread = threading.Thread(
+            target=self._background_downloader,
+            daemon=True,
+            name="DataDownloader"
+        )
+        self._download_thread.start()
+    
+    def _background_downloader(self):
+        """Background thread: download next files when space available."""
+        while not self._stop_download.is_set():
+            try:
+                current_gb = self._get_active_size_gb()
+                target = self.stream_cfg.target_gb
+                
+                # If under target, try to download more
+                if current_gb < target:
+                    # Find next undownloaded file
+                    with self._lock:
+                        next_file = None
+                        for f in self._all_files:
+                            if f not in self._downloaded_files:
+                                next_file = f
+                                break
+                    
+                    if next_file:
+                        print(f"Background: downloading next file ({current_gb:.1f}/{target}GB)")
+                        self._download_file(next_file)
+                    else:
+                        print("Background: all files downloaded")
+                        break
+                
+                # Check for space pressure
+                elif current_gb > self.stream_cfg.max_gb:
+                    print(f"Background: over max ({current_gb:.1f} > {self.stream_cfg.max_gb}GB), cleaning...")
+                    self._cleanup_old_files(current_gb - target)
+                
+                time.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                print(f"Background downloader error: {e}")
+                time.sleep(60)
+    
+    def get_active_files(self) -> List[Path]:
+        """Get currently available files for training."""
+        with self._lock:
+            return [f for f in self._active_files if f.exists()]
+    
+    def register_file_access(self, filepath: Path):
+        """Mark file as recently used (updates mtime for LRU)."""
+        if filepath.exists():
+            try:
+                os.utime(filepath, None)
+            except Exception:
+                pass
+    
+    def shutdown(self):
+        """Stop background downloader."""
+        self._stop_download.set()
+        if self._download_thread:
+            self._download_thread.join(timeout=10)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get streaming stats."""
+        with self._lock:
+            return {
+                "active_files": len(self._active_files),
+                "active_gb": self._get_active_size_gb(),
+                "total_available": len(self._all_files),
+                "downloaded": len(self._downloaded_files),
+                "target_gb": self.stream_cfg.target_gb,
+                "download_errors": len(self._download_errors),
+            }
+
+
+def create_streaming_manager(
+    data_dir: Path,
+    config: dict,
+    streaming_config: Optional[StreamingConfig] = None,
+) -> StreamingDataManager:
+    """Factory function for streaming data manager."""
+    return StreamingDataManager(data_dir, config, streaming_config)
+
+
 def download_training_data(
     data_dir: Path,
     config: dict,
@@ -799,25 +1120,52 @@ PYBIND11_MODULE(cpp_loader, m) {
 def create_dataloader(
     config: dict,
     dataset: Optional[StreamingBinpackDataset] = None,
+    streaming_manager: Optional[StreamingDataManager] = None,
     is_train: bool = True,
 ) -> DataLoader:
     hw_cfg = config.get("hardware", {})
     data_cfg = config.get("data", {})
     train_cfg = config.get("training", {})
     adv_cfg = config.get("advanced", {})
+    
+    # Get streaming config from data config
+    stream_cfg_dict = data_cfg.get("streaming", {})
+    use_streaming = stream_cfg_dict.get("enabled", False)
 
     if dataset is None:
         sources = [DataSource(**s) for s in data_cfg.get("sources", [])]
-        dataset = StreamingBinpackDataset(
-            data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
-            sources=sources,
-            max_files=data_cfg.get("num_files_simultaneous", 6),
-            shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
-            seed=config.get("seed", 42),
-            drop_last_batch=data_cfg.get("drop_last_batch", True),
-            curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
-            augmentations=adv_cfg.get("augmentations", {}),
-        )
+        
+        if use_streaming and streaming_manager is not None:
+            # Use streaming manager's active files
+            active_files = streaming_manager.get_active_files()
+            if not active_files:
+                raise RuntimeError("No active files available from streaming manager")
+            
+            # Create a custom dataset that uses the streaming manager's files
+            dataset = StreamingBinpackDataset(
+                data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
+                sources=sources,
+                max_files=len(active_files),
+                shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
+                seed=config.get("seed", 42),
+                drop_last_batch=data_cfg.get("drop_last_batch", True),
+                curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
+                augmentations=adv_cfg.get("augmentations", {}),
+            )
+            # Override file discovery to use streaming manager's active files
+            dataset.files = active_files
+            print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
+        else:
+            dataset = StreamingBinpackDataset(
+                data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
+                sources=sources,
+                max_files=data_cfg.get("num_files_simultaneous", 6),
+                shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
+                seed=config.get("seed", 42),
+                drop_last_batch=data_cfg.get("drop_last_batch", True),
+                curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
+                augmentations=adv_cfg.get("augmentations", {}),
+            )
 
     # Gradient accumulation: effective batch = micro_batch * accum_steps
     micro_batch = train_cfg.get("micro_batch_size", 8192)

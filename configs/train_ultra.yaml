@@ -32,6 +32,16 @@ data:
   num_files_simultaneous: 6
   shuffle_buffer_mb: 1024
   drop_last_batch: true
+  # Streaming data management (for limited disk space)
+  streaming:
+    enabled: true
+    mode: "adaptive"          # fixed_window, adaptive, all_at_once
+    target_gb: 5.0            # Keep ~5GB active on disk
+    min_gb: 2.0               # Emergency cleanup threshold
+    max_gb: 8.0               # Forced rotation threshold
+    fallback_gb: 3.0          # Fallback if space critical
+    keep_recent: 2            # Never delete N most recent files
+    auto_cleanup: true        # Enable background cleanup
   # High-quality sources (relabeled with depth 15+ evals)
   sources:
     - type: "huggingface"
