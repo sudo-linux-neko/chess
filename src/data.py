@@ -616,7 +616,12 @@ class StreamingDataManager:
             return total / 1024**3
     
     def _ensure_initial_data(self):
-        """Download initial batch to reach target_gb."""
+        """Download just enough to start training immediately.
+        
+        Downloads 1 priority file (enough to begin), then lets the
+        background downloader prefetch the rest. Training never waits
+        for full target_gb.
+        """
         target = self.stream_cfg.target_gb
         current = self._get_active_size_gb()
         
@@ -624,19 +629,30 @@ class StreamingDataManager:
             print(f"Already have {current:.1f}GB active data (target: {target}GB)")
             return
         
-        needed = target - current
-        print(f"Downloading initial data: need {needed:.1f}GB more...")
+        if not self._all_files:
+            print("No files available to download")
+            return
         
-        # Sort by priority, download until target reached
+        # Sort by priority, download just 1 file to start
         priority_files = sorted(
             [f for f in self._all_files if f not in self._downloaded_files],
             key=lambda f: next((s.priority for s in self.sources if f.name in str(s.pattern)), 999)
         )
         
-        for filepath in priority_files:
-            if self._get_active_size_gb() >= target:
-                break
-            self._download_file(filepath)
+        if priority_files:
+            print(f"Downloading first file to start training (target: {target}GB, background will prefetch rest)...")
+            try:
+                self._download_file(priority_files[0])
+            except Exception as e:
+                print(f"Initial download failed: {e}")
+            
+            current = self._get_active_size_gb()
+            if current > 0:
+                print(f"Ready to train with {current:.1f}GB on disk. Background downloading rest...")
+            else:
+                print("WARNING: No data downloaded yet, will retry in background")
+        else:
+            print("All files already downloaded")
     
     def _download_file(self, filepath: Path) -> bool:
         """Download a single file with space management."""
@@ -668,8 +684,9 @@ class StreamingDataManager:
                 filename=filepath.name,
                 repo_type="dataset",
                 local_dir=str(self.data_dir),
-                local_dir_use_symlinks=False,
                 cache_dir=str(self.data_dir),
+                resume_download=True,
+                force_download=False,
             )
             
             with self._lock:
