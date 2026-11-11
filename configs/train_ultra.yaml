@@ -28,7 +28,7 @@ seed: 42
 # Sources from vondele/nettest: from_kaggle_2_relabel, master-binpacks_relabel, etc.
 data:
   data_dir: "/kaggle/working/data"
-  max_data_gb: 18
+  max_data_gb: 10
   num_files_simultaneous: 6
   shuffle_buffer_mb: 1024
   drop_last_batch: true
