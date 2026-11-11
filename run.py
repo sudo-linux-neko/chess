@@ -322,11 +322,20 @@ def run_full_training(config, is_kaggle):
     if resume_ckpt:
         try:
             print(f"  Resuming from: {resume_ckpt}")
+            # Optimizer/scheduler may not be available before trainer.fit()
+            try:
+                opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+            except Exception:
+                opt = None
+            try:
+                sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+            except Exception:
+                sched = None
             checkpoint_manager.load_checkpoint(
                 resume_ckpt,
                 model=pl_module.model,
-                optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-                scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+                optimizer=opt,
+                scheduler=sched,
                 scaler=None,
                 training_state=pl_module.training_state,
                 ema_model=pl_module.ema_model,

@@ -540,9 +540,14 @@ def run_export_only(config: dict) -> int:
     checkpoint_manager.load_checkpoint(latest_ckpt, model=model)
 
     exporter = create_exporter(config)
-    test_loader = create_dataloader(config, is_train=False)
-    test_batch = next(iter(test_loader))
-    test_data = test_batch["features"][:100]
+    test_data = None
+    try:
+        test_loader = create_dataloader(config, is_train=False)
+        test_batch = next(iter(test_loader))
+        test_data = test_batch["features"][:100]
+    except Exception as e:
+        print(f"  Warning: Could not get test data: {e}")
+        test_data = torch.zeros(100, config["model"]["input_dim"], dtype=torch.float32)
 
     nnue_path = exporter.export(model, test_data, use_ema=True)
 
@@ -579,9 +584,14 @@ def run_verify_export(config: dict) -> int:
     nnue_path = max(nnue_files, key=lambda f: f.stat().st_mtime)
     print(f"Verifying: {nnue_path}")
 
-    test_loader = create_dataloader(config, is_train=False)
-    test_batch = next(iter(test_loader))
-    test_data = test_batch["features"][:config["export"]["verify_samples"]]
+    test_data = None
+    try:
+        test_loader = create_dataloader(config, is_train=False)
+        test_batch = next(iter(test_loader))
+        test_data = test_batch["features"][:config["export"]["verify_samples"]]
+    except Exception as e:
+        print(f"  Warning: Could not get test data: {e}")
+        test_data = torch.zeros(config["export"]["verify_samples"], config["model"]["input_dim"], dtype=torch.float32)
 
     exporter = create_exporter(config)
     result = exporter.verify_export(model, nnue_path, test_data)

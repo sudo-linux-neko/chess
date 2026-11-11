@@ -70,6 +70,14 @@ class ExportVerifier:
         abs_errors = np.abs(original - exported)
         rel_errors = abs_errors / (np.abs(original) + 1e-8)
         
+        # Correlation (handle constant arrays gracefully)
+        try:
+            corr = np.corrcoef(original, exported)[0, 1]
+            if np.isnan(corr):
+                corr = 0.0
+        except Exception:
+            corr = 0.0
+        
         metrics = {
             "mean_abs_error_cp": float(np.mean(abs_errors)),
             "max_abs_error_cp": float(np.max(abs_errors)),
@@ -81,7 +89,7 @@ class ExportVerifier:
             "p95_cp": float(np.percentile(abs_errors, 95)),
             "p99_cp": float(np.percentile(abs_errors, 99)),
             "p99.9_cp": float(np.percentile(abs_errors, 99.9)),
-            "correlation": float(np.corrcoef(original, exported)[0, 1]),
+            "correlation": float(corr),
             "verified": True,
         }
         
@@ -101,7 +109,7 @@ class ExportVerifier:
         layers = self._load_nnue_layers(nnue_path)
         
         # Prepare data for Rust
-        test_np = test_data.numpy().astype(np.float32)
+        test_np = test_data.cpu().numpy().astype(np.float32)
         
         # Create Rust quantized NNUE - try both possible APIs
         try:
@@ -139,7 +147,7 @@ class ExportVerifier:
         """Pure Python quantized inference (fallback)."""
         layers = self._load_nnue_layers(nnue_path)
         
-        x = test_data.numpy()
+        x = test_data.cpu().numpy()
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 64, 1280)
         

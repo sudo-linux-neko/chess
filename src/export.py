@@ -305,6 +305,7 @@ class NNUEExporter:
         print(f"Verifying export with {self.verify_samples} samples...")
 
         original_model.eval()
+        original_model = original_model.to(test_data.device)
         with torch.no_grad():
             original_preds = original_model(test_data).cpu().numpy().squeeze()
             
