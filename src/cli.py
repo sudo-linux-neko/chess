@@ -71,6 +71,8 @@ def setup_environment(config: dict):
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
+    if hasattr(torch.backends.cuda.matmul, 'allow_fp16_reduced_precision_reduction'):
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
     # Seeds
     seed = config.get("seed", 42)
@@ -290,8 +292,8 @@ def run_smoke_test(config: dict) -> int:
     print("\n5. Testing checkpoint save/load...")
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
-        optimizer=pl_module.optimizers(),
-        scheduler=pl_module.lr_schedulers(),
+        optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+        scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
         scaler=None,
         training_state=pl_module.training_state,
         config=config,
@@ -393,8 +395,8 @@ def run_training(config: dict) -> int:
         checkpoint_manager.load_checkpoint(
             resume_ckpt,
             model=pl_module.model,
-            optimizer=pl_module.optimizers(),
-            scheduler=pl_module.lr_schedulers(),
+            optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+            scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
             scaler=None,  # Scaler restored by PL automatically
             training_state=pl_module.training_state,
             ema_model=pl_module.ema_model,
@@ -439,8 +441,8 @@ def run_training(config: dict) -> int:
     print("\n6. Saving final checkpoint...")
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
-        optimizer=pl_module.optimizers(),
-        scheduler=pl_module.lr_schedulers(),
+        optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+        scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
         scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
         training_state=pl_module.training_state,
         config=config,

@@ -360,8 +360,8 @@ class NNUELightningModule(pl.LightningModule):
         try:
             ckpt_path = self.checkpoint_manager.save_checkpoint(
                 model=self.model,
-                optimizer=self.optimizers(),
-                scheduler=self.lr_schedulers(),
+                optimizer=self.optimizers()[0] if self.optimizers() else None,
+                scheduler=self.lr_schedulers()[0] if self.lr_schedulers() else None,
                 scaler=self.trainer.scaler if hasattr(self.trainer, 'scaler') else None,
                 training_state=self.training_state,
                 config=self.config,
@@ -578,6 +578,10 @@ class OverfittingCallback(Callback):
         self.auto_stop: bool = False
 
     def on_validation_epoch_end(self, trainer, pl_module):
+        # Only rank 0 makes overfitting decisions in DDP
+        if trainer.global_rank != 0:
+            return
+        
         metrics = trainer.callback_metrics
         val_loss = metrics.get("val/loss_total")
         train_loss = metrics.get("train/loss_total")
@@ -644,7 +648,7 @@ class OverfittingCallback(Callback):
         elif strategy == 2:
             self._add_dropout(pl_module, p=0.1)
         elif strategy == 3:
-            self._reduce_learning_rate(trainer, factor=0.5)
+            self._reduce_learning_rate(pl_module, factor=0.5)
         elif strategy == 4:
             self._increase_label_smoothing(pl_module, factor=2.0)
         
@@ -675,9 +679,12 @@ class OverfittingCallback(Callback):
         else:
             print("   WARNING: Model doesn't support dynamic dropout")
 
-    def _reduce_learning_rate(self, trainer, factor: float = 0.5):
+    def _reduce_learning_rate(self, pl_module, factor: float = 0.5):
         """Reduce learning rate."""
-        for opt in trainer.optimizers:
+        optimizers = pl_module.optimizers()
+        if optimizers is None:
+            return
+        for opt in optimizers:
             for group in opt.param_groups:
                 old_lr = group['lr']
                 new_lr = old_lr * factor

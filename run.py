@@ -305,8 +305,8 @@ def run_full_training(config, is_kaggle):
         checkpoint_manager.load_checkpoint(
             resume_ckpt,
             model=pl_module.model,
-            optimizer=pl_module.optimizers(),
-            scheduler=pl_module.lr_schedulers(),
+            optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+            scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
             scaler=None,
             training_state=pl_module.training_state,
             ema_model=pl_module.ema_model,
@@ -322,12 +322,28 @@ def run_full_training(config, is_kaggle):
     
     # 6. Signal handler for graceful shutdown
     print("\n[6/8] Setting up graceful shutdown handler...")
-    shutdown_requested = False
     
     def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        print(f"\n  Received signal {signum}, saving checkpoint...")
-        shutdown_requested = True
+        print(f"\n  Received signal {signum}, saving checkpoint immediately...")
+        try:
+            ckpt_path = checkpoint_manager.save_checkpoint(
+                model=pl_module.model,
+                optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+                scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+                scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
+                training_state=pl_module.training_state,
+                config=config,
+                ema_model=pl_module.ema_model,
+                is_best=True,
+            )
+            if ckpt_path:
+                hf_uploader.queue_upload(ckpt_path)
+                meta_path = ckpt_path.with_suffix('.meta.json')
+                if meta_path.exists():
+                    hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+            print(f"  Checkpoint saved: {ckpt_path}")
+        except Exception as e:
+            print(f"  Checkpoint save failed: {e}")
         trainer.should_stop = True
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -360,8 +376,8 @@ def run_full_training(config, is_kaggle):
     
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
-        optimizer=pl_module.optimizers(),
-        scheduler=pl_module.lr_schedulers(),
+        optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
+        scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
         scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
         training_state=pl_module.training_state,
         config=config,
