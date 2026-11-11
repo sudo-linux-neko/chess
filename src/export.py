@@ -198,11 +198,15 @@ class NNUEExporter:
     ):
         """Verify quantization accuracy on calibration data."""
         with torch.no_grad():
+            # Move to CPU for numpy conversion
+            cal = calibration_data.cpu()
+            layer_cpu = layer.cpu()
+            
             # Original output
-            orig_out = layer(calibration_data).cpu().numpy()
+            orig_out = layer_cpu(cal).numpy()
             
             # Quantized output (Stockfish-compatible: bias added directly, not scaled)
-            quant_out = calibration_data.numpy() @ weight_q.T.astype(np.float32) * scales
+            quant_out = cal.numpy() @ weight_q.T.astype(np.float32) * scales
             quant_out += bias_q.astype(np.float32)
             
             # Apply ClippedReLU for hidden layers

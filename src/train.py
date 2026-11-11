@@ -229,28 +229,28 @@ class NNUELightningModule(pl.LightningModule):
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Single training step. Gradient accumulation handled by PL via accumulate_grad_batches."""
-        features = batch["features"]
-        wdl_target = batch["wdl"]
-        eval_target = batch["eval"]
+        features = batch["features"].to(self.device, non_blocking=True)
+        wdl_target = batch["wdl"].to(self.device, non_blocking=True)
+        eval_target = batch["eval"].to(self.device, non_blocking=True)
         
-        # Forward pass
-        eval_pred = self.model(features)
-        
-        # WDL logits from eval (simplified - in practice use separate head)
-        wdl_logits = self._eval_to_wdl_logits(eval_pred)
-        
-        # Compute lambda for this step
-        lambda_val = self._get_lambda()
-        
-        # Losses
-        loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
-        loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
-        
-        # Combined loss
-        loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
+        # Forward pass with mixed precision
+        with torch.cuda.amp.autocast(enabled=self.config.get("advanced", {}).get("amp", {}).get("enabled", True)):
+            eval_pred = self.model(features)
+            
+            # WDL logits from eval
+            wdl_logits = self._eval_to_wdl_logits(eval_pred)
+            
+            # Compute lambda for this step
+            lambda_val = self._get_lambda()
+            
+            # Losses
+            loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
+            loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
+            
+            # Combined loss
+            loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         
         # Scale loss for gradient accumulation (PL does NOT auto-scale)
-        # Without this, effective LR is accum_steps x too high
         loss = loss / self.accum_steps
         
         # Check for NaN/Inf
@@ -260,12 +260,13 @@ class NNUELightningModule(pl.LightningModule):
         
         # Log losses (only on accumulation boundaries to reduce noise)
         if (batch_idx + 1) % self.accum_steps == 0:
+            # Log UNSCALED loss for monitoring (actual loss value)
             self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True, sync_dist=True)
             self.log("train/loss_eval", loss_eval.detach(), prog_bar=True, sync_dist=True)
-            self.log("train/loss_total", loss.detach(), prog_bar=True, sync_dist=True)
+            self.log("train/loss_total", (loss.detach() * self.accum_steps), prog_bar=True, sync_dist=True)
             self.log("train/lambda", lambda_val, prog_bar=True, sync_dist=True)
             
-            self.training_state.train_losses.append(loss.detach().item())
+            self.training_state.train_losses.append((loss.detach() * self.accum_steps).item())
             self.training_state.lambda_history.append(lambda_val)
         
         return loss
@@ -339,8 +340,10 @@ class NNUELightningModule(pl.LightningModule):
             decay = self.lambda_jitter.get("decay", 0.999)
             
             # Per-sample and per-batch jitter using torch RNG
+            # Cap decay factor to prevent underflow for large step values
+            decay_factor = min(decay ** min(step, 100000), 1.0)
             jitter = (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * sample_jitter
-            jitter += (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * batch_jitter * (decay ** step)
+            jitter += (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * batch_jitter * decay_factor
             lambda_val += jitter
         
         return max(0.0, min(1.0, lambda_val))
@@ -386,7 +389,7 @@ class NNUELightningModule(pl.LightningModule):
         model.eval()
         
         try:
-            with torch.no_grad():
+            with torch.inference_mode():
                 eval_pred = model(features)
                 wdl_logits = self._eval_to_wdl_logits(eval_pred)
                 
@@ -419,13 +422,25 @@ class NNUELightningModule(pl.LightningModule):
         train_cfg = self.config.get("training", {})
         
         # AdamW with factorized weight decay
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=train_cfg.get("learning_rate", 0.0008),
-            weight_decay=train_cfg.get("weight_decay", 4e-5),
-            betas=(0.9, 0.999),
-            eps=1e-8,
-        )
+        # Use fused AdamW if available (CUDA only, faster)
+        optimizer_kwargs = {
+            "lr": train_cfg.get("learning_rate", 0.0008),
+            "weight_decay": train_cfg.get("weight_decay", 4e-5),
+            "betas": (0.9, 0.999),
+            "eps": 1e-8,
+        }
+        try:
+            optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                fused=True,
+                **optimizer_kwargs,
+            )
+        except TypeError:
+            # fused not supported (CPU or older PyTorch)
+            optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                **optimizer_kwargs,
+            )
         
         # One-Cycle LR Scheduler
         lr_cfg = train_cfg.get("lr_schedule", {})
@@ -455,10 +470,15 @@ class NNUELightningModule(pl.LightningModule):
         }
 
     def on_before_optimizer_step(self, optimizer):
-        """Log learning rate before optimizer step."""
+        """Log learning rate and apply gradient clipping before optimizer step."""
         # Log current LR for progress bar (every optimizer step)
         lr = optimizer.param_groups[0]['lr']
         self.log("lr", lr, prog_bar=True, sync_dist=True)
+        
+        # Gradient clipping (PL does this automatically but we add explicit safety)
+        grad_clip_val = self.config.get("training", {}).get("gradient_clip_val", 1.0)
+        if grad_clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip_val)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         """Save custom state."""
@@ -495,6 +515,12 @@ class NNUELightningModule(pl.LightningModule):
         # Load EMA state
         if "ema_state_dict" in checkpoint and self.ema_model is not None:
             self.ema_model.load_state_dict(checkpoint["ema_state_dict"])
+
+    def on_train_end(self):
+        """Cleanup CUDA memory at end of training."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
 
 class TimeLimitCallback(Callback):
