@@ -114,8 +114,8 @@ class NNUEModel(nn.Module):
     
     Architecture:
     - FeatureTransformer: HalfKAv2_hm (shared weights, 64 buckets)
-    - Hidden1: 16384 → 256 (ClippedReLU)
-    - Hidden2: 256 → 32 (ClippedReLU)
+    - Hidden1: 16384 → 256 (ClippedReLU + Dropout)
+    - Hidden2: 256 → 32 (ClippedReLU + Dropout)
     - Output: 32 → 1 (centipawns)
     
     Total params: ~2.5M trainable
@@ -126,6 +126,7 @@ class NNUEModel(nn.Module):
         self.config = config
         model_cfg = config.get("model", {})
         self.clipped_relu_max = model_cfg.get("clipped_relu_max", 1.0)
+        self.dropout_p = model_cfg.get("dropout", 0.0)
 
         # Feature transformer (shared weights)
         self.feature_transformer = FeatureTransformer(
@@ -149,12 +150,23 @@ class NNUEModel(nn.Module):
         # Output layer (no activation - outputs centipawns)
         self.output_layer = nn.Linear(model_cfg.get("hidden2", 32), model_cfg.get("output_dim", 1))
 
+        # Dropout layers for overfitting prevention
+        self.dropout1 = nn.Dropout(self.dropout_p)
+        self.dropout2 = nn.Dropout(self.dropout_p)
+
         # Initialize hidden layers with Kaiming
         self._init_hidden_layers(model_cfg.get("init_type", "kaiming_normal"), model_cfg.get("init_gain", 1.0))
 
         # EMA model (for evaluation)
         self.ema_model: Optional[NNUEModel] = None
         self.ema_decay = config.get("advanced", {}).get("ema", {}).get("decay", 0.9999)
+
+    def set_dropout(self, p: float):
+        """Dynamically adjust dropout probability."""
+        self.dropout_p = p
+        self.dropout1.p = p
+        self.dropout2.p = p
+        print(f"Dropout set to {p}")
 
     def _init_hidden_layers(self, init_type: str, gain: float):
         for module in [self.hidden1_linear, self.hidden2_linear, self.output_layer]:
@@ -181,9 +193,11 @@ class NNUEModel(nn.Module):
         # Feature transformer: (batch, 81920) -> (batch, 16384)
         x = self.feature_transformer(x)
 
-        # Hidden layers with inline ClippedReLU (faster, torch.compile friendly)
+        # Hidden layers with inline ClippedReLU + Dropout (faster, torch.compile friendly)
         x = self.hidden1_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 256)
+        x = self.dropout1(x)
         x = self.hidden2_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 32)
+        x = self.dropout2(x)
 
         # Output
         x = self.output_layer(x)  # (batch, 1)

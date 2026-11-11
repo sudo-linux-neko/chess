@@ -470,6 +470,15 @@ def run_training(config: dict) -> int:
                 print(f"  Train/Val gap: {status['gap']:.4f}")
             print(f"  Best val loss: {cb.best_val_loss:.4f}")
             print(f"  Val checks: {len(cb.val_losses)}")
+            if status.get('remediation'):
+                print(f"  Remediation tried: {', '.join(status['remediation'])}")
+            if status.get('attempt'):
+                print(f"  Remediation attempt: {status['attempt']}/{cb.max_remediation_attempts}")
+            
+            # Restore best model if we stopped due to overfitting
+            if status['status'] in ('stopped_overfitting', 'overfitting') and not status['learning']:
+                print(f"  🔄 Restoring best model from step with val_loss={cb.best_val_loss:.4f}...")
+                cb.restore_best_model(pl_module)
             break
     
     print(f"  Total steps: {pl_module.training_state.step}")

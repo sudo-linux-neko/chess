@@ -92,6 +92,8 @@ model:
   init_gain: 1.0
   # ClippedReLU clamp value
   clipped_relu_max: 1.0
+  # Dropout for overfitting prevention (0.0 = disabled, 0.1 = light)
+  dropout: 0.0
 
 training:
   batch_size: 65536
