@@ -360,15 +360,17 @@ def download_training_data(
     max_files: int = 10,
 ) -> List[Path]:
     data_cfg = config.get("data", {})
-    sources = data_cfg.get("sources", [])
+    source_cfgs = data_cfg.get("sources", [])
     max_data_gb = data_cfg.get("max_data_gb", 18)
     downloaded_files = []
+    data_sources = []  # Store DataSource objects for priority sorting
 
-    for source_cfg in sources:
+    for source_cfg in source_cfgs:
         if len(downloaded_files) >= max_files:
             break
 
         source = DataSource(**source_cfg)
+        data_sources.append(source)  # Keep for sorting
         print(f"Processing source: {source.repo_id} (priority {source.priority})")
 
         if source.type == "huggingface":
@@ -381,8 +383,8 @@ def download_training_data(
             files = _copy_from_local(source, data_dir, max_files - len(downloaded_files))
             downloaded_files.extend(files)
 
-    # Sort by priority
-    downloaded_files.sort(key=lambda f: next((s.priority for s in sources if f.name in str(s.pattern)), 999))
+    # Sort by priority using DataSource objects
+    downloaded_files.sort(key=lambda f: next((s.priority for s in data_sources if f.name in str(s.pattern)), 999))
     return downloaded_files
 
 
@@ -396,40 +398,53 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
     repo_id = source.repo_id
     pattern = source.pattern
     
-    try:
-        files = list_repo_files(repo_id=repo_id, repo_type="dataset")
-        binpack_files = [f for f in files if f.endswith(".binpack")]
-        binpack_files.sort()
+    max_retries = 3
+    retry_delay = 30  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            files = list_repo_files(repo_id=repo_id, repo_type="dataset")
+            binpack_files = [f for f in files if f.endswith(".binpack")]
+            binpack_files.sort()
+            
+            downloaded = []
+            total_size = 0
+            
+            for filename in binpack_files[:max_files]:
+                dest = data_dir / filename
+                if dest.exists():
+                    downloaded.append(dest)
+                    total_size += dest.stat().st_size
+                    continue
+
+                if total_size > max_data_gb * 1024**3:
+                    break
+
+                print(f"Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
+                local_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    repo_type="dataset",
+                    local_dir=str(data_dir),
+                    local_dir_use_symlinks=False,
+                )
+                downloaded.append(Path(local_path))
+                total_size += Path(local_path).stat().st_size
+
+            return downloaded
         
-        downloaded = []
-        total_size = 0
-        
-        for filename in binpack_files[:max_files]:
-            dest = data_dir / filename
-            if dest.exists():
-                downloaded.append(dest)
-                total_size += dest.stat().st_size
-                continue
-
-            if total_size > max_data_gb * 1024**3:
-                break
-
-            print(f"Downloading {filename} from HF...")
-            local_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                repo_type="dataset",
-                local_dir=str(data_dir),
-                local_dir_use_symlinks=False,
-            )
-            downloaded.append(Path(local_path))
-            total_size += Path(local_path).stat().st_size
-
-        return downloaded
-
-    except Exception as e:
-        print(f"HF download failed: {e}")
-        return []
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"HF download failed (attempt {attempt+1}/{max_retries}): {e}")
+                print(f"Retrying in {retry_delay}s...")
+                import time
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                print(f"HF download failed after {max_retries} attempts: {e}")
+                return []
+    
+    return []
 
 
 def _download_from_http(source: DataSource, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
@@ -459,7 +474,7 @@ def _copy_from_local(source: DataSource, data_dir: Path, max_files: int) -> List
 # C++ Loader Compilation
 # ============================================================
 
-def compile_cpp_loader(build_dir: str = "src/cpp_loader/build") -> bool:
+def compile_cpp_loader(build_dir: str = "build") -> bool:
     cpp_loader_dir = Path(__file__).parent / "cpp_loader"
     if not cpp_loader_dir.exists():
         _create_cpp_loader_structure(cpp_loader_dir)
