@@ -162,30 +162,30 @@ class NNUELightningModule(pl.LightningModule):
         self.max_positions = train_cfg.get("max_positions", 55_000_000_000)
         
         # Loss functions
-        self.wdl_loss_fn = WDLLoss(train_cfg.get("label_smoothing", 0.05))
+        self.wdl_loss_fn = WDLLoss(float(train_cfg.get("label_smoothing", 0.05)))
         self.eval_loss_fn = QuantileLoss(
-            delta=train_cfg.get("eval_delta", 100.0),
-            asymmetry=train_cfg.get("qp_asymmetry", 0.22866886710086187),
-            pow_exp=train_cfg.get("pow_exp", 2.4340402395048404),
+            delta=float(train_cfg.get("eval_delta", 100.0)),
+            asymmetry=float(train_cfg.get("qp_asymmetry", 0.22866886710086187)),
+            pow_exp=float(train_cfg.get("pow_exp", 2.4340402395048404)),
         )
         
         # Lambda schedule (WDL/eval blending)
         self.lambda_cfg = train_cfg.get("lambda_schedule", {})
-        self.start_lambda = self.lambda_cfg.get("start_lambda", 1.0)
-        self.end_lambda = self.lambda_cfg.get("end_lambda", 1.0)
-        self.lambda_total_steps = self.lambda_cfg.get("total_steps", 5052000)
-        self.lambda_warmup_pct = self.lambda_cfg.get("warmup_pct", 0.25)
-        self.lambda_delta = self.lambda_cfg.get("delta", -0.3)
+        self.start_lambda = float(self.lambda_cfg.get("start_lambda", 1.0))
+        self.end_lambda = float(self.lambda_cfg.get("end_lambda", 1.0))
+        self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", 5052000))
+        self.lambda_warmup_pct = float(self.lambda_cfg.get("warmup_pct", 0.25))
+        self.lambda_delta = float(self.lambda_cfg.get("delta", -0.3))
         self.lambda_jitter = self.lambda_cfg.get("jitter", {})
         
         # Curriculum learning
         self.curriculum_cfg = train_cfg.get("curriculum", {})
         
         # Scaling
-        self.in_scaling = train_cfg.get("in_scaling", 295.6539508488627)
-        self.out_scaling = train_cfg.get("out_scaling", 379.98724077106635)
-        self.in_offset = train_cfg.get("in_offset", 285.2706341467852)
-        self.out_offset = train_cfg.get("out_offset", 289.1258344152218)
+        self.in_scaling = float(train_cfg.get("in_scaling", 295.6539508488627))
+        self.out_scaling = float(train_cfg.get("out_scaling", 379.98724077106635))
+        self.in_offset = float(train_cfg.get("in_offset", 285.2706341467852))
+        self.out_offset = float(train_cfg.get("out_offset", 289.1258344152218))
         
         # Training state
         self.training_state = TrainingState()
@@ -303,7 +303,7 @@ class NNUELightningModule(pl.LightningModule):
         """Convert centipawn evaluation to WDL logits."""
         # Stockfish-style conversion using sigmoid
         # W = sigmoid(eval / scale), L = sigmoid(-eval / scale), D = 1 - W - L
-        scale = self.config.get("training", {}).get("wdl_scale", 400.0)
+        scale = float(self.config.get("training", {}).get("wdl_scale", 400.0))
         w = torch.sigmoid(eval_cp / scale)
         l = torch.sigmoid(-eval_cp / scale)
         d = 1.0 - w - l
@@ -452,13 +452,19 @@ class NNUELightningModule(pl.LightningModule):
         """Configure optimizer and LR scheduler."""
         train_cfg = self.config.get("training", {})
         
+        # Cast config values to float (YAML can load scientific notation as string)
+        lr = float(train_cfg.get("learning_rate", 0.0008))
+        weight_decay = float(train_cfg.get("weight_decay", 4e-5))
+        betas = tuple(float(b) for b in train_cfg.get("betas", (0.9, 0.999)))
+        eps = float(train_cfg.get("eps", 1e-8))
+        
         # AdamW with factorized weight decay
         # Use fused AdamW if available (CUDA only, faster)
         optimizer_kwargs = {
-            "lr": train_cfg.get("learning_rate", 0.0008),
-            "weight_decay": train_cfg.get("weight_decay", 4e-5),
-            "betas": (0.9, 0.999),
-            "eps": 1e-8,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "betas": betas,
+            "eps": eps,
         }
         try:
             optimizer = torch.optim.AdamW(
@@ -475,10 +481,10 @@ class NNUELightningModule(pl.LightningModule):
         
         # One-Cycle LR Scheduler
         lr_cfg = train_cfg.get("lr_schedule", {})
-        total_steps = lr_cfg.get("total_steps", 5108000)
-        max_lr = lr_cfg.get("max_lr", 0.0008)
-        warmup_pct = lr_cfg.get("warmup_pct", 0.05)
-        final_div = lr_cfg.get("final_div", 10000.0)
+        total_steps = int(lr_cfg.get("total_steps", 5108000))
+        max_lr = float(lr_cfg.get("max_lr", 0.0008))
+        warmup_pct = float(lr_cfg.get("warmup_pct", 0.05))
+        final_div = float(lr_cfg.get("final_div", 10000.0))
         
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
