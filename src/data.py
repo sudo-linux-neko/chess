@@ -676,6 +676,23 @@ class StreamingDataManager:
             print(f"No source found for {filepath.name}")
             return False
         
+        # Pre-check file size against available disk space
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            info = api.dataset_info(repo_id=source.repo_id, files_metadata=True)
+            for sibling in info.siblings:
+                if sibling.rfilename == filepath.name and sibling.size:
+                    stat = shutil.disk_usage(self.data_dir)
+                    free_gb = stat.free / 1024**3
+                    needed_gb = sibling.size / 1024**3 + 1.0  # 1GB safety margin
+                    if free_gb < needed_gb:
+                        print(f"  Skipping {filepath.name} (~{needed_gb:.1f}GB needed, {free_gb:.1f}GB free)")
+                        return False
+                    break
+        except Exception:
+            pass  # If we can't get size, proceed and check as we go
+        
         print(f"Downloading {filepath.name} ({source.repo_id})...")
         
         try:
@@ -1035,6 +1052,18 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
             downloaded = []
             total_size = 0
             
+            # Get file sizes from HF API to pre-check disk space
+            file_sizes = {}
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi()
+                info = api.dataset_info(repo_id=repo_id, files_metadata=True)
+                for sibling in info.siblings:
+                    if sibling.rfilename in binpack_files:
+                        file_sizes[sibling.rfilename] = sibling.size or 0
+            except Exception:
+                pass  # If we can't get sizes, download and check as we go
+            
             for filename in binpack_files[:max_files]:
                 dest = data_dir / filename
                 if dest.exists():
@@ -1043,9 +1072,20 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     print(f"  Already have: {filename}")
                     continue
 
-                # Check disk space before each file
+                # Pre-check: skip files that won't fit on disk
+                estimated_size = file_sizes.get(filename, 0)
+                if estimated_size == 0:
+                    # No size info - estimate based on max_data_gb / max_files
+                    estimated_size = (max_data_gb * 1024**3) / max_files
+                
                 stat = shutil.disk_usage(data_dir)
                 free_gb = stat.free / 1024**3
+                needed_gb = estimated_size / 1024**3 + 1.0  # 1GB safety margin
+                
+                if free_gb < needed_gb:
+                    print(f"  Skipping {filename} (~{needed_gb:.1f}GB needed, {free_gb:.1f}GB free)")
+                    continue
+                
                 if free_gb < 1.0:
                     print(f"  Disk space low ({free_gb:.1f}GB free), stopping download")
                     break
