@@ -369,6 +369,14 @@ class NNUELightningModule(pl.LightningModule):
             )
             if ckpt_path:
                 self.hf_uploader.queue_upload(ckpt_path)
+                # Also upload metadata JSON with loss, time, step, etc.
+                meta_path = ckpt_path.with_suffix('.meta.json')
+                if meta_path.exists():
+                    self.hf_uploader.queue_upload(
+                        meta_path,
+                        remote_path=f"checkpoints/{meta_path.name}",
+                        priority=5,
+                    )
         except Exception as e:
             print(f"Checkpoint save failed: {e}")
 
@@ -537,6 +545,79 @@ class TimeLimitCallback(Callback):
             trainer.should_stop = True
 
 
+class OverfittingCallback(Callback):
+    """
+    Detects overfitting by monitoring train vs validation loss gap.
+    
+    Logs warnings when the model starts memorizing instead of learning.
+    Helps you know if the NNUE is actually improving or just overfitting.
+    """
+    
+    def __init__(self, patience: int = 5, gap_threshold: float = 0.15):
+        self.patience = patience
+        self.gap_threshold = gap_threshold
+        self.val_losses: List[float] = []
+        self.train_losses: List[float] = []
+        self.best_val_loss: float = float('inf')
+        self.worse_count: int = 0
+        self.overfitting_detected: bool = False
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metrics = trainer.callback_metrics
+        val_loss = metrics.get("val/loss_total")
+        train_loss = metrics.get("train/loss_total")
+        
+        if val_loss is None or train_loss is None:
+            return
+        
+        val_loss = float(val_loss)
+        train_loss = float(train_loss)
+        
+        self.val_losses.append(val_loss)
+        self.train_losses.append(train_loss)
+        
+        # Check if validation is improving
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.worse_count = 0
+        else:
+            self.worse_count += 1
+        
+        # Detect overfitting: val loss much higher than train loss AND not improving
+        gap = val_loss - train_loss
+        if gap > self.gap_threshold and self.worse_count >= self.patience:
+            self.overfitting_detected = True
+            print(f"\n⚠️  OVERFITTING DETECTED: val_loss={val_loss:.4f} vs train_loss={train_loss:.4f} (gap={gap:.4f})")
+            print(f"   Validation hasn't improved for {self.worse_count} checks. Model may be memorizing.")
+            print(f"   Consider: more data, dropout, weight decay, or early stopping.")
+        
+        # Early stopping if validation keeps getting worse
+        if self.worse_count >= self.patience * 3:
+            print(f"\n🛑 EARLY STOPPING: Validation loss worse for {self.worse_count} checks")
+            trainer.should_stop = True
+
+    def get_learning_status(self) -> Dict[str, Any]:
+        """Return whether the model is still learning or has plateaued/overfit."""
+        if len(self.val_losses) < 2:
+            return {"status": "insufficient_data", "learning": True}
+        
+        recent_val = self.val_losses[-5:] if len(self.val_losses) >= 5 else self.val_losses
+        recent_train = self.train_losses[-5:] if len(self.train_losses) >= 5 else self.train_losses
+        
+        val_trend = recent_val[-1] - recent_val[0]  # negative = improving
+        train_trend = recent_train[-1] - recent_train[0]
+        gap = recent_val[-1] - recent_train[-1]
+        
+        if self.overfitting_detected:
+            return {"status": "overfitting", "learning": False, "gap": gap}
+        elif val_trend > 0 and train_trend < 0:
+            return {"status": "overfitting", "learning": False, "gap": gap}
+        elif abs(val_trend) < 1e-4:
+            return {"status": "plateaued", "learning": False, "gap": gap}
+        else:
+            return {"status": "learning", "learning": True, "gap": gap}
+
+
 class TQDMProgressBar(Callback):
     """Custom tqdm progress bar with ETA, steps/sec, and detailed metrics."""
     
@@ -649,9 +730,15 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     max_steps = config.get("training", {}).get("lr_schedule", {}).get("total_steps", 5108000)
     
     # Callbacks - TimeLimitCallback handles time budget; TQDMProgressBar shows progress
+    # OverfittingCallback detects if model is memorizing vs actually learning
+    overfitting_cfg = adv_cfg.get("overfitting", {})
     callbacks = [
         TimeLimitCallback(
             max_hours=time_cfg.get("hours", 9.5),
+        ),
+        OverfittingCallback(
+            patience=overfitting_cfg.get("patience", 5),
+            gap_threshold=overfitting_cfg.get("gap_threshold", 0.15),
         ),
         TQDMProgressBar(
             max_steps=max_steps,

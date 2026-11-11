@@ -450,8 +450,34 @@ def run_training(config: dict) -> int:
 
     if ckpt_path:
         hf_uploader.queue_upload(ckpt_path)
+        # Also upload metadata JSON with loss, time, etc.
+        meta_path = ckpt_path.with_suffix('.meta.json')
+        if meta_path.exists():
+            hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
 
-    print("\n7. Exporting final model (EMA)...")
+    # Report learning status
+    print("\n" + "=" * 60)
+    print("LEARNING STATUS REPORT")
+    print("=" * 60)
+    
+    # Find overfitting callback
+    for cb in trainer.callbacks:
+        if isinstance(cb, OverfittingCallback):
+            status = cb.get_learning_status()
+            print(f"  Status: {status['status']}")
+            print(f"  Learning: {'YES' if status['learning'] else 'NO'}")
+            if 'gap' in status:
+                print(f"  Train/Val gap: {status['gap']:.4f}")
+            print(f"  Best val loss: {cb.best_val_loss:.4f}")
+            print(f"  Val checks: {len(cb.val_losses)}")
+            break
+    
+    print(f"  Total steps: {pl_module.training_state.step}")
+    print(f"  Total time: {elapsed/3600:.2f} hours")
+    print(f"  Best val loss: {pl_module.training_state.best_val_loss:.4f}")
+    print(f"  Final train loss: {pl_module.training_state.train_losses[-1] if pl_module.training_state.train_losses else 'N/A'}")
+    print(f"  Final val loss: {pl_module.training_state.val_losses[-1] if pl_module.training_state.val_losses else 'N/A'}")
+    print("=" * 60)
     exporter = create_exporter(config)
 
     test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)

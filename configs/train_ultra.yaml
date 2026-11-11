@@ -218,6 +218,12 @@ advanced:
     rotate_180: true
     color_flip: true
 
+  # Overfitting detection (warns if model is memorizing instead of learning)
+  overfitting:
+    enabled: true
+    patience: 5
+    gap_threshold: 0.15
+
   # Mixed precision training
   amp:
     enabled: true
