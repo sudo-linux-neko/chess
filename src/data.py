@@ -1084,6 +1084,16 @@ def compile_cpp_loader(build_dir: str = "build") -> bool:
     build_path = cpp_loader_dir / build_dir
     build_path.mkdir(parents=True, exist_ok=True)
 
+    # Set CMAKE_PREFIX_PATH so CMake can find pybind11
+    env = os.environ.copy()
+    try:
+        import pybind11
+        cmake_dir = pybind11.get_cmake_dir()
+        env["CMAKE_PREFIX_PATH"] = cmake_dir + os.pathsep + env.get("CMAKE_PREFIX_PATH", "")
+    except ImportError:
+        print("  pybind11 not installed - C++ loader will not compile")
+        return False
+
     try:
         result = subprocess.run(
             ["cmake", ".."],
@@ -1091,6 +1101,7 @@ def compile_cpp_loader(build_dir: str = "build") -> bool:
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
         if result.returncode != 0:
             print(f"CMake configure failed: {result.stderr}")
@@ -1102,6 +1113,7 @@ def compile_cpp_loader(build_dir: str = "build") -> bool:
             capture_output=True,
             text=True,
             timeout=300,
+            env=env,
         )
         if result.returncode != 0:
             print(f"Make failed: {result.stderr}")

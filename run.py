@@ -246,12 +246,14 @@ def run_full_training(config, is_kaggle):
     print("STARTING FULL TRAINING")
     print("=" * 60)
     
-    # 1. Compile C++ binpack loader
+    # 1. Compile C++ binpack loader (non-fatal - Python fallback available)
     print("\n[1/8] Compiling C++ binpack loader...")
-    if not compile_cpp_loader():
-        print("ERROR: C++ loader compilation failed")
-        return 1
-    print("C++ loader ready.")
+    cpp_ok = compile_cpp_loader()
+    if cpp_ok:
+        print("C++ loader ready (fast path).")
+    else:
+        print("WARNING: C++ loader compilation failed - using Python fallback (slower but works).")
+        print("   To fix: pip install pybind11 cmake")
     
     # 2. Setup data (streaming or full download)
     print("\n[2/8] Preparing training data...")
@@ -289,11 +291,20 @@ def run_full_training(config, is_kaggle):
     print("\n[3/8] Initializing training components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
-    hf_uploader.start()
+    
+    # Check HF token status
+    hf_token = os.environ.get("HF_TOKEN", "")
+    if hf_token:
+        print(f"  HF_TOKEN: configured ({len(hf_token)} chars) - uploads enabled")
+        hf_uploader.start()
+    else:
+        print("  HF_TOKEN: NOT SET - uploads disabled (training continues without HF)")
+        print("   Add HF_TOKEN to Kaggle Secrets for checkpoint uploads")
+        # Don't start uploader if no token - FakeHFUploader doesn't need it
     
     # 4. Check for resumable checkpoint
     print("\n[4/8] Checking for resumable checkpoint...")
-    resume_ckpt = find_resumable_checkpoint(config, hf_uploader)
+    resume_ckpt = find_resumable_checkpoint(config, hf_uploader if hf_token else None)
     
     model = create_model(config)
     print(f"  Model parameters: {model.get_num_parameters():,}")
@@ -362,9 +373,16 @@ def run_full_training(config, is_kaggle):
         print(f"\n  Training error: {e}")
         import traceback
         traceback.print_exc()
-        hf_uploader.shutdown(wait=True)
+        if hf_token:
+            try:
+                hf_uploader.shutdown(wait=True)
+            except Exception:
+                pass
         if streaming_manager:
-            streaming_manager.shutdown()
+            try:
+                streaming_manager.shutdown()
+            except Exception:
+                pass
         return 1
     
     elapsed = time.time() - start
@@ -385,8 +403,14 @@ def run_full_training(config, is_kaggle):
         is_best=True,
     )
     
-    if ckpt_path:
-        hf_uploader.queue_upload(ckpt_path)
+    if ckpt_path and hf_token:
+        try:
+            hf_uploader.queue_upload(ckpt_path)
+            meta_path = ckpt_path.with_suffix('.meta.json')
+            if meta_path.exists():
+                hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+        except Exception as e:
+            print(f"  Checkpoint upload failed: {e}")
     
     # Export final model (EMA)
     print("\n  Exporting final model (.nnue)...")
@@ -408,11 +432,20 @@ def run_full_training(config, is_kaggle):
         except Exception as e:
             print(f"  Verification error: {e}")
     
-    hf_uploader.queue_export(nnue_path)
-    
-    # Wait for uploads to complete
-    print("  Waiting for background uploads to complete...")
-    hf_uploader.shutdown(wait=True, timeout=300)
+    if hf_token:
+        try:
+            hf_uploader.queue_export(nnue_path)
+        except Exception as e:
+            print(f"  Export upload failed: {e}")
+        
+        # Wait for uploads to complete
+        print("  Waiting for background uploads to complete...")
+        try:
+            hf_uploader.shutdown(wait=True, timeout=300)
+        except Exception as e:
+            print(f"  Uploader shutdown warning: {e}")
+    else:
+        print("  Skipping HF uploads (no HF_TOKEN)")
     
     # Shutdown streaming manager
     if streaming_manager:
