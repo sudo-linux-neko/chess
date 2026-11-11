@@ -953,12 +953,15 @@ def download_training_data(
     data_sources = []  # Store DataSource objects for priority sorting
 
     # Check disk space before starting
-    print(f"Checking disk space for {max_data_gb}GB download...")
-    if not check_disk_space(data_dir, max_data_gb + 5):  # Need extra 5GB buffer
+    print(f"Checking disk space for up to {max_data_gb}GB download...")
+    free_gb = check_disk_space(data_dir, max_data_gb + 2)
+    if not free_gb:
         print("Attempting to free space by cleaning HF cache...")
         clean_hf_cache()
-        if not check_disk_space(data_dir, max_data_gb + 5):
-            print("WARNING: Still low on space, continuing anyway...")
+        free_gb = check_disk_space(data_dir, max_data_gb + 2)
+        if not free_gb:
+            print("WARNING: Low disk space - will download minimal files only")
+            max_data_gb = min(max_data_gb, 5.0)  # Cap at 5GB if space is tight
 
     for source_cfg in source_cfgs:
         if len(downloaded_files) >= max_files:
@@ -977,6 +980,12 @@ def download_training_data(
         elif source.type == "local":
             files = _copy_from_local(source, data_dir, max_files - len(downloaded_files))
             downloaded_files.extend(files)
+
+        # Re-check disk after each source
+        free_gb = check_disk_space(data_dir, 2)
+        if not free_gb:
+            print("Disk space critically low, stopping download")
+            break
 
     # Sort by priority using DataSource objects
     downloaded_files.sort(key=lambda f: next((s.priority for s in data_sources if f.name in str(s.pattern)), 999))
@@ -1015,23 +1024,35 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                 if dest.exists():
                     downloaded.append(dest)
                     total_size += dest.stat().st_size
+                    print(f"  Already have: {filename}")
                     continue
 
-                if total_size > max_data_gb * 1024**3:
+                # Check disk space before each file
+                stat = shutil.disk_usage(data_dir)
+                free_gb = stat.free / 1024**3
+                if free_gb < 1.0:
+                    print(f"  Disk space low ({free_gb:.1f}GB free), stopping download")
                     break
 
-                print(f"Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
+                if total_size > max_data_gb * 1024**3:
+                    print(f"  Reached {max_data_gb}GB limit, stopping download")
+                    break
+
+                print(f"  Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
                 # Use cache_dir=data_dir to avoid 2x disk usage (cache + local_dir)
                 local_path = hf_hub_download(
                     repo_id=repo_id,
                     filename=filename,
                     repo_type="dataset",
                     local_dir=str(data_dir),
-                    local_dir_use_symlinks=False,
-                    cache_dir=str(data_dir),  # KEY: download directly to data_dir, no separate cache
+                    cache_dir=str(data_dir),
+                    resume_download=True,
+                    force_download=False,
                 )
                 downloaded.append(Path(local_path))
-                total_size += Path(local_path).stat().st_size
+                file_size = Path(local_path).stat().st_size
+                total_size += file_size
+                print(f"  Downloaded: {filename} ({file_size / 1024**3:.2f}GB)")
 
             return downloaded
         
