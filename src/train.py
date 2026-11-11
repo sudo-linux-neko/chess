@@ -238,45 +238,46 @@ class NNUELightningModule(pl.LightningModule):
         self._step_start_time = time.time()
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Single training step. Gradient accumulation handled by PL via accumulate_grad_batches."""
+        """Single training step. Gradient accumulation handled by PL via accumulate_grad_batches.
+        
+        NOTE: Do NOT manually divide loss by accum_steps - PyTorch Lightning 2.x
+        automatically scales loss for gradient accumulation. Manual division would
+        cause double-division, making gradients accum_steps^2 too small.
+        """
         features = batch["features"].to(self.device, non_blocking=True)
         wdl_target = batch["wdl"].to(self.device, non_blocking=True)
         eval_target = batch["eval"].to(self.device, non_blocking=True)
         
-        # Forward pass with mixed precision
-        with torch.cuda.amp.autocast(enabled=self.config.get("advanced", {}).get("amp", {}).get("enabled", True)):
-            eval_pred = self.model(features)
-            
-            # WDL logits from eval
-            wdl_logits = self._eval_to_wdl_logits(eval_pred)
-            
-            # Compute lambda for this step
-            lambda_val = self._get_lambda()
-            
-            # Losses
-            loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
-            loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
-            
-            # Combined loss
-            loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
+        # Forward pass - PL handles AMP automatically via precision="16-mixed"
+        eval_pred = self.model(features)
         
-        # Scale loss for gradient accumulation (PL does NOT auto-scale)
-        loss = loss / self.accum_steps
+        # WDL logits from eval
+        wdl_logits = self._eval_to_wdl_logits(eval_pred)
         
-        # Check for NaN/Inf
+        # Compute lambda for this step
+        lambda_val = self._get_lambda()
+        
+        # Losses
+        loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
+        loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
+        
+        # Combined loss (unscaled - PL handles accumulation scaling)
+        loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
+        
+        # Check for NaN/Inf - skip step if non-finite to avoid corrupting weights
         if not torch.isfinite(loss):
-            print(f"WARNING: Non-finite loss detected: {loss.item()}")
-            loss = torch.nan_to_num(loss, nan=1.0, posinf=1.0, neginf=1.0)
+            print(f"WARNING: Non-finite loss detected at step {self.training_state.step}, skipping step")
+            # Return a dummy loss that won't affect gradients
+            return torch.tensor(0.0, device=loss.device, requires_grad=True)
         
         # Log losses (only on accumulation boundaries to reduce noise)
         if (batch_idx + 1) % self.accum_steps == 0:
-            # Log UNSCALED loss for monitoring (actual loss value)
             self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True, sync_dist=True)
             self.log("train/loss_eval", loss_eval.detach(), prog_bar=True, sync_dist=True)
-            self.log("train/loss_total", (loss.detach() * self.accum_steps), prog_bar=True, sync_dist=True)
+            self.log("train/loss_total", loss.detach(), prog_bar=True, sync_dist=True)
             self.log("train/lambda", lambda_val, prog_bar=True, sync_dist=True)
             
-            self.training_state.train_losses.append((loss.detach() * self.accum_steps).item())
+            self.training_state.train_losses.append(loss.detach().item())
             self.training_state.lambda_history.append(lambda_val)
         
         return loss
@@ -349,24 +350,29 @@ class NNUELightningModule(pl.LightningModule):
             batch_jitter = self.lambda_jitter.get("batch_jitter", 0.0070)
             decay = self.lambda_jitter.get("decay", 0.999)
             
-            # Per-sample and per-batch jitter using torch RNG
+            # Single RNG call for both jitter components (faster)
             # Cap decay factor to prevent underflow for large step values
             decay_factor = min(decay ** min(step, 100000), 1.0)
-            jitter = (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * sample_jitter
-            jitter += (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * batch_jitter * decay_factor
+            jitter_vals = torch.rand(2, generator=self._lambda_rng)
+            jitter = (jitter_vals[0].item() * 2 - 1) * sample_jitter
+            jitter += (jitter_vals[1].item() * 2 - 1) * batch_jitter * decay_factor
             lambda_val += jitter
         
         return max(0.0, min(1.0, lambda_val))
 
     def _maybe_checkpoint(self):
-        """Save checkpoint if interval elapsed."""
+        """Save checkpoint if interval elapsed (rank 0 only in DDP)."""
+        if self.trainer.global_rank != 0:
+            return
         now = time.time()
         if now - self._last_checkpoint_time >= self.checkpoint_interval:
             self._save_checkpoint()
             self._last_checkpoint_time = now
 
     def _save_checkpoint(self):
-        """Save training checkpoint."""
+        """Save training checkpoint (rank 0 only)."""
+        if self.trainer.global_rank != 0:
+            return
         try:
             ckpt_path = self.checkpoint_manager.save_checkpoint(
                 model=self.model,

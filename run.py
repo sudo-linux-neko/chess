@@ -349,6 +349,13 @@ def run_full_training(config, is_kaggle):
     print("\n[6/8] Setting up graceful shutdown handler...")
 
     def signal_handler(signum, frame):
+        # Only rank 0 saves checkpoints in DDP to prevent file corruption
+        try:
+            if trainer.global_rank != 0:
+                return
+        except Exception:
+            pass
+        
         print(f"\n  Received signal {signum}, saving checkpoint immediately...")
         try:
             ckpt_path = checkpoint_manager.save_checkpoint(

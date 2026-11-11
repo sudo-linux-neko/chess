@@ -110,6 +110,7 @@ class StreamingBinpackDataset(IterableDataset):
         self._rng = random.Random(seed)
         self._position_lock = threading.Lock()
         self._file_loaders: Dict[int, Any] = {}
+        self._max_cached_loaders = 8  # Limit open file handles
 
     def _discover_files(self) -> List[Path]:
         """Find all .binpack files in data_dir, sorted by priority source."""
@@ -153,8 +154,12 @@ class StreamingBinpackDataset(IterableDataset):
                 yield from self._iterate_python_fallback(filepath, global_file_idx, rng)
 
     def _iterate_cpp_loader(self, filepath: Path, file_idx: int, rng: random.Random):
-        # Get or create loader (reuse across epochs)
+        # Get or create loader (reuse across epochs) with cache size limit
         if file_idx not in self._file_loaders:
+            # Evict oldest if cache full
+            if len(self._file_loaders) >= self._max_cached_loaders:
+                oldest_idx = next(iter(self._file_loaders))
+                del self._file_loaders[oldest_idx]
             try:
                 self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
             except Exception as e:
