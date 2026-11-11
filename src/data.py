@@ -85,6 +85,7 @@ class StreamingBinpackDataset(IterableDataset):
         drop_last_batch: bool = True,
         curriculum_enabled: bool = True,
         augmentations: Optional[Dict[str, bool]] = None,
+        streaming_manager: Optional[StreamingDataManager] = None,
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -97,6 +98,7 @@ class StreamingBinpackDataset(IterableDataset):
         self.drop_last_batch = drop_last_batch
         self.curriculum_enabled = curriculum_enabled
         self.augmentations = augmentations or {}
+        self.streaming_manager = streaming_manager
 
         self.files = self._discover_files()
         self.current_file_idx = start_file
@@ -175,6 +177,7 @@ class StreamingBinpackDataset(IterableDataset):
 
         chunk_size = min(self.shuffle_buffer_size, len(indices))
         
+        positions_yielded = 0
         for chunk_start in range(0, len(indices), chunk_size):
             chunk_end = min(chunk_start + chunk_size, len(indices))
             chunk = indices[chunk_start:chunk_end]
@@ -184,6 +187,7 @@ class StreamingBinpackDataset(IterableDataset):
                 try:
                     pos_data = dataset[idx]
                     yield self._pos_to_tensors(pos_data, rng)
+                    positions_yielded += 1
                 except Exception as e:
                     print(f"Error reading position {idx} from {filepath}: {e}")
                     continue
@@ -191,6 +195,11 @@ class StreamingBinpackDataset(IterableDataset):
                 with self._position_lock:
                     self.current_position = idx + 1
                     self.current_file_idx = file_idx
+            
+            # Register batch consumption for predictive prefetching
+            if self.streaming_manager and positions_yielded > 0:
+                self.streaming_manager.register_batch_consumed(filepath, positions_yielded)
+                positions_yielded = 0
 
     def _iterate_python_fallback(self, filepath: Path, file_idx: int, rng: random.Random):
         try:
@@ -215,6 +224,7 @@ class StreamingBinpackDataset(IterableDataset):
                 
                 chunk_size = min(self.shuffle_buffer_size, len(indices))
                 
+                positions_yielded = 0
                 for chunk_start in range(0, len(indices), chunk_size):
                     chunk = indices[chunk_start:min(chunk_start + chunk_size, len(indices))]
                     rng.shuffle(chunk)
@@ -224,6 +234,7 @@ class StreamingBinpackDataset(IterableDataset):
                             f.seek(self._get_position_offset(filepath, idx))
                             pos_data = self._read_position(f)
                             yield self._pos_to_tensors(pos_data, rng)
+                            positions_yielded += 1
                         except Exception as e:
                             print(f"Error reading position {idx} from {filepath}: {e}")
                             continue
@@ -231,6 +242,11 @@ class StreamingBinpackDataset(IterableDataset):
                         with self._position_lock:
                             self.current_position = idx + 1
                             self.current_file_idx = file_idx
+                    
+                    # Register batch consumption for predictive prefetching
+                    if self.streaming_manager and positions_yielded > 0:
+                        self.streaming_manager.register_batch_consumed(filepath, positions_yielded)
+                        positions_yielded = 0
         except Exception as e:
             print(f"Failed to read {filepath}: {e}")
 
@@ -508,7 +524,7 @@ class StreamingDataManager:
     
     Features:
     - Keeps only target_gb of data on disk at any time
-    - Downloads next files in background while training
+    - Downloads next files in background while training (predictive prefetching)
     - Auto-cleans old files when space low
     - Falls back to smaller chunks on disk pressure
     - Thread-safe for multi-worker training
@@ -535,6 +551,13 @@ class StreamingDataManager:
         self._download_thread: Optional[threading.Thread] = None
         self._stop_download = threading.Event()
         self._download_errors: List[str] = []
+        
+        # Predictive prefetching state
+        self._file_consumption_rates: Dict[Path, float] = {}  # positions/sec per file
+        self._last_consumption_update = time.time()
+        self._total_positions_consumed = 0
+        self._prefetch_threshold_pct = 0.5  # Start next download at 50% consumption
+        self._min_prefetch_gb = 2.0  # Minimum GB to keep as buffer
         
         # Discover all potential files from HF (without downloading)
         self._discover_all_files()
@@ -727,16 +750,32 @@ class StreamingDataManager:
         self._download_thread.start()
     
     def _background_downloader(self):
-        """Background thread: download next files when space available."""
+        """
+        Background thread: PREDICTIVELY download next files.
+        
+        Strategy:
+        - Monitor consumption rate of active files
+        - Start next download when current file ~50% consumed
+        - Always keep min_prefetch_gb buffer ready
+        - Download in priority order
+        """
+        print("Background downloader started (predictive prefetching)")
+        
         while not self._stop_download.is_set():
             try:
                 current_gb = self._get_active_size_gb()
                 target = self.stream_cfg.target_gb
                 
-                # If under target, try to download more
-                if current_gb < target:
-                    # Find next undownloaded file
+                # Update consumption rates
+                self._update_consumption_rates()
+                
+                # Check if we need to prefetch next file
+                should_prefetch = self._should_prefetch_next()
+                
+                # If under target OR should prefetch, download next
+                if current_gb < target or should_prefetch:
                     with self._lock:
+                        # Find next undownloaded file by priority
                         next_file = None
                         for f in self._all_files:
                             if f not in self._downloaded_files:
@@ -744,7 +783,7 @@ class StreamingDataManager:
                                 break
                     
                     if next_file:
-                        print(f"Background: downloading next file ({current_gb:.1f}/{target}GB)")
+                        print(f"Background: prefetching next file ({current_gb:.1f}/{target}GB, rate={self._get_avg_consumption_rate():.1f} pos/s)")
                         self._download_file(next_file)
                     else:
                         print("Background: all files downloaded")
@@ -755,16 +794,87 @@ class StreamingDataManager:
                     print(f"Background: over max ({current_gb:.1f} > {self.stream_cfg.max_gb}GB), cleaning...")
                     self._cleanup_old_files(current_gb - target)
                 
-                time.sleep(30)  # Check every 30 seconds
+                # Dynamic sleep: more frequent when close to needing prefetch
+                sleep_time = self._calculate_sleep_time()
+                time.sleep(sleep_time)
                 
             except Exception as e:
                 print(f"Background downloader error: {e}")
                 time.sleep(60)
     
-    def get_active_files(self) -> List[Path]:
-        """Get currently available files for training."""
+    def _update_consumption_rates(self):
+        """Estimate how fast training consumes each file."""
+        now = time.time()
+        dt = now - self._last_consumption_update
+        if dt < 10:  # Update at most every 10 seconds
+            return
+        
         with self._lock:
-            return [f for f in self._active_files if f.exists()]
+            for f in self._active_files:
+                if f.exists():
+                    # Track file access time for LRU
+                    try:
+                        mtime = f.stat().st_mtime
+                        # If file was accessed recently, it's being consumed
+                        if now - mtime < 60:  # Accessed in last minute
+                            if f not in self._file_consumption_rates:
+                                self._file_consumption_rates[f] = 0
+                            # Rough estimate: if accessed, consumption > 0
+                            self._file_consumption_rates[f] = max(
+                                self._file_consumption_rates[f], 1000
+                            )
+                    except Exception:
+                        pass
+        
+        self._last_consumption_update = now
+    
+    def _get_avg_consumption_rate(self) -> float:
+        """Get average consumption rate across active files."""
+        with self._lock:
+            if not self._file_consumption_rates:
+                return 50000  # Default estimate: 50k pos/s
+            return sum(self._file_consumption_rates.values()) / len(self._file_consumption_rates)
+    
+    def _should_prefetch_next(self) -> bool:
+        """
+        Determine if we should start downloading the next file.
+        
+        Returns True if:
+        - Current active files are being consumed (consumption rate > 0)
+        - We have less than min_prefetch_gb buffer
+        - Or current file is > prefetch_threshold_pct consumed
+        """
+        with self._lock:
+            if not self._active_files:
+                return True  # No files at all
+            
+            # Check if we have enough buffer
+            if current_gb := self._get_active_size_gb() < self._min_prefetch_gb:
+                return True
+            
+            # Check consumption rate - if data is being consumed, prefetch
+            avg_rate = self._get_avg_consumption_rate()
+            if avg_rate > 1000:  # Data is being consumed
+                # Estimate time until we need next file
+                # Rough: at 50k pos/s, 5GB (~50M pos) lasts ~1000s
+                # Start download 500s before = 50% threshold
+                return True
+        
+        return False
+    
+    def _calculate_sleep_time(self) -> int:
+        """Dynamic sleep based on urgency."""
+        current_gb = self._get_active_size_gb()
+        target = self.stream_cfg.target_gb
+        
+        if current_gb < self._min_prefetch_gb:
+            return 10  # Urgent: check every 10s
+        elif current_gb < target * 0.7:
+            return 20  # Getting low: check every 20s
+        elif self._should_prefetch_next():
+            return 15  # Prefetch soon: check every 15s
+        else:
+            return 30  # Normal: check every 30s
     
     def register_file_access(self, filepath: Path):
         """Mark file as recently used (updates mtime for LRU)."""
@@ -773,6 +883,22 @@ class StreamingDataManager:
                 os.utime(filepath, None)
             except Exception:
                 pass
+    
+    def register_batch_consumed(self, filepath: Path, num_positions: int):
+        """Register that a batch was consumed from a file for rate tracking."""
+        with self._lock:
+            self._total_positions_consumed += num_positions
+            if filepath not in self._file_consumption_rates:
+                self._file_consumption_rates[filepath] = 0
+            # Update running average
+            self._file_consumption_rates[filepath] = (
+                self._file_consumption_rates[filepath] * 0.9 + num_positions * 0.1
+            )
+    
+    def get_active_files(self) -> List[Path]:
+        """Get currently available files for training."""
+        with self._lock:
+            return [f for f in self._active_files if f.exists()]
     
     def shutdown(self):
         """Stop background downloader."""
@@ -789,6 +915,8 @@ class StreamingDataManager:
                 "total_available": len(self._all_files),
                 "downloaded": len(self._downloaded_files),
                 "target_gb": self.stream_cfg.target_gb,
+                "avg_consumption_rate": self._get_avg_consumption_rate(),
+                "total_positions_consumed": self._total_positions_consumed,
                 "download_errors": len(self._download_errors),
             }
 
@@ -1151,6 +1279,7 @@ def create_dataloader(
                 drop_last_batch=data_cfg.get("drop_last_batch", True),
                 curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                 augmentations=adv_cfg.get("augmentations", {}),
+                streaming_manager=streaming_manager,  # Pass for predictive prefetching
             )
             # Override file discovery to use streaming manager's active files
             dataset.files = active_files
