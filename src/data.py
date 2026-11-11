@@ -23,6 +23,7 @@ import threading
 import time
 import subprocess
 import urllib.request
+import shutil
 from pathlib import Path
 from typing import Iterator, Optional, List, Tuple, Dict, Any, Union
 from dataclasses import dataclass, field
@@ -449,6 +450,37 @@ def verify_checksum(filepath: Path, expected_sha256: str) -> bool:
     return sha256.hexdigest() == expected_sha256
 
 
+def check_disk_space(path: Path, required_gb: float) -> bool:
+    """Check if there's enough disk space at path."""
+    try:
+        stat = shutil.disk_usage(path)
+        free_gb = stat.free / 1024**3
+        if free_gb < required_gb:
+            print(f"WARNING: Low disk space: {free_gb:.1f}GB free, need {required_gb:.1f}GB")
+            return False
+        print(f"Disk space OK: {free_gb:.1f}GB free")
+        return True
+    except Exception as e:
+        print(f"Could not check disk space: {e}")
+        return True  # Assume OK if check fails
+
+
+def clean_hf_cache(cache_dir: Path = None):
+    """Clean HF cache to free space."""
+    if cache_dir is None:
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    
+    if cache_dir.exists():
+        print(f"Cleaning HF cache at {cache_dir}...")
+        try:
+            for item in cache_dir.iterdir():
+                if item.is_dir() and item.name.startswith("datasets--"):
+                    shutil.rmtree(item, ignore_errors=True)
+                    print(f"  Removed: {item.name}")
+        except Exception as e:
+            print(f"Cache cleanup error: {e}")
+
+
 def download_training_data(
     data_dir: Path,
     config: dict,
@@ -459,6 +491,14 @@ def download_training_data(
     max_data_gb = data_cfg.get("max_data_gb", 18)
     downloaded_files = []
     data_sources = []  # Store DataSource objects for priority sorting
+
+    # Check disk space before starting
+    print(f"Checking disk space for {max_data_gb}GB download...")
+    if not check_disk_space(data_dir, max_data_gb + 5):  # Need extra 5GB buffer
+        print("Attempting to free space by cleaning HF cache...")
+        clean_hf_cache()
+        if not check_disk_space(data_dir, max_data_gb + 5):
+            print("WARNING: Still low on space, continuing anyway...")
 
     for source_cfg in source_cfgs:
         if len(downloaded_files) >= max_files:
@@ -484,6 +524,11 @@ def download_training_data(
 
 
 def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
+    """
+    Download from HF Hub directly to data_dir without cache duplication.
+    
+    Uses cache_dir=data_dir to avoid 2x disk usage during download.
+    """
     try:
         from huggingface_hub import list_repo_files, hf_hub_download
     except ImportError:
@@ -516,12 +561,14 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     break
 
                 print(f"Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
+                # Use cache_dir=data_dir to avoid 2x disk usage (cache + local_dir)
                 local_path = hf_hub_download(
                     repo_id=repo_id,
                     filename=filename,
                     repo_type="dataset",
                     local_dir=str(data_dir),
                     local_dir_use_symlinks=False,
+                    cache_dir=str(data_dir),  # KEY: download directly to data_dir, no separate cache
                 )
                 downloaded.append(Path(local_path))
                 total_size += Path(local_path).stat().st_size
