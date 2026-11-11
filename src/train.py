@@ -198,6 +198,7 @@ class NNUELightningModule(pl.LightningModule):
         self.checkpoint_interval = time_cfg.get("checkpoint_interval_min", 10) * 60
         self._last_checkpoint_time = time.time()
         self._last_global_step = -1  # Track PL global step for accurate accumulation boundaries
+        self._last_log_step = -1  # Track last logged global step to avoid batch_idx misalignment
         
         # RNG for lambda jitter (worker-safe)
         self._lambda_rng = torch.Generator()
@@ -272,7 +273,13 @@ class NNUELightningModule(pl.LightningModule):
             return torch.tensor(0.0, device=loss.device, requires_grad=True)
         
         # Log losses (only on accumulation boundaries to reduce noise)
-        if (batch_idx + 1) % self.accum_steps == 0:
+        # Use trainer.global_step instead of batch_idx % accum_steps because
+        # batch_idx resets each epoch while PL's accumulation counter is global.
+        current_step = self.trainer.global_step
+        if current_step == self._last_log_step:
+            pass  # Already logged this step
+        elif (current_step - self._last_log_step) >= 1:
+            self._last_log_step = current_step
             self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True, sync_dist=True)
             self.log("train/loss_eval", loss_eval.detach(), prog_bar=True, sync_dist=True)
             self.log("train/loss_total", loss.detach(), prog_bar=True, sync_dist=True)

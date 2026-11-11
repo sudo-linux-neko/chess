@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.model import create_model
 from src.data import (create_dataloader, compile_cpp_loader, download_training_data, 
                       StreamingBinpackDataset, DataSource, StreamingDataManager, StreamingConfig)
-from src.train import NNUELightningModule, create_trainer
+from src.train import NNUELightningModule, create_trainer, OverfittingCallback
 from src.checkpoint import CheckpointManager, find_resumable_checkpoint
 from src.hf_upload import create_uploader
 from src.export import create_exporter
@@ -290,10 +290,19 @@ def run_smoke_test(config: dict) -> int:
     print(f"Training completed in {elapsed:.1f}s")
 
     print("\n5. Testing checkpoint save/load...")
+    # Optimizer/scheduler may not be available before trainer.fit()
+    try:
+        opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+    except Exception:
+        opt = None
+    try:
+        sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+    except Exception:
+        sched = None
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
-        optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-        scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+        optimizer=opt,
+        scheduler=sched,
         scaler=None,
         training_state=pl_module.training_state,
         config=config,
@@ -392,11 +401,20 @@ def run_training(config: dict) -> int:
     if resume_ckpt:
         print(f"Resuming from: {resume_ckpt}")
         # Load checkpoint into pl_module.model (not a separate model variable)
+        # Optimizer/scheduler may not be available before trainer.fit()
+        try:
+            opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+        except Exception:
+            opt = None
+        try:
+            sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+        except Exception:
+            sched = None
         checkpoint_manager.load_checkpoint(
             resume_ckpt,
             model=pl_module.model,
-            optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-            scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+            optimizer=opt,
+            scheduler=sched,
             scaler=None,  # Scaler restored by PL automatically
             training_state=pl_module.training_state,
             ema_model=pl_module.ema_model,
@@ -439,10 +457,19 @@ def run_training(config: dict) -> int:
     print(f"Final loss: {pl_module.training_state.train_losses[-1] if pl_module.training_state.train_losses else 'N/A'}")
 
     print("\n6. Saving final checkpoint...")
+    # Optimizer/scheduler should be available after trainer.fit()
+    try:
+        opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+    except Exception:
+        opt = None
+    try:
+        sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+    except Exception:
+        sched = None
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
-        optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-        scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+        optimizer=opt,
+        scheduler=sched,
         scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
         training_state=pl_module.training_state,
         config=config,
@@ -491,9 +518,14 @@ def run_training(config: dict) -> int:
     print("=" * 60)
     exporter = create_exporter(config)
 
-    test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
-    test_batch = next(iter(test_loader))
-    test_data = test_batch["features"][:100]
+    test_data = None
+    try:
+        test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
+        test_batch = next(iter(test_loader))
+        test_data = test_batch["features"][:100]
+    except Exception as e:
+        print(f"  Warning: Could not get test data for export: {e}")
+        test_data = torch.zeros(100, config["model"]["input_dim"], dtype=torch.float32)
 
     # Export EMA model for better playing strength
     nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)

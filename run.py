@@ -367,10 +367,19 @@ def run_full_training(config, is_kaggle):
         
         print(f"\n  Received signal {signum}, saving checkpoint immediately...")
         try:
+            # Optimizer/scheduler may not be available before trainer.fit()
+            try:
+                opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+            except Exception:
+                opt = None
+            try:
+                sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+            except Exception:
+                sched = None
             ckpt_path = checkpoint_manager.save_checkpoint(
                 model=pl_module.model,
-                optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-                scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+                optimizer=opt,
+                scheduler=sched,
                 scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
                 training_state=pl_module.training_state,
                 config=config,
@@ -464,10 +473,19 @@ def run_full_training(config, is_kaggle):
 
     ckpt_path = None
     try:
+        # Optimizer/scheduler should be available after trainer.fit()
+        try:
+            opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+        except Exception:
+            opt = None
+        try:
+            sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+        except Exception:
+            sched = None
         ckpt_path = checkpoint_manager.save_checkpoint(
             model=pl_module.model,
-            optimizer=pl_module.optimizers()[0] if pl_module.optimizers() else None,
-            scheduler=pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None,
+            optimizer=opt,
+            scheduler=sched,
             scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
             training_state=pl_module.training_state,
             config=config,

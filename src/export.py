@@ -381,7 +381,7 @@ class NNUEExporter:
                 }
 
         # Convert to Rust format
-        test_np = test_data.numpy().astype(np.float32)
+        test_np = test_data.cpu().numpy().astype(np.float32)
         batch_size = test_np.shape[0]
         
         # Prepare data for Rust
@@ -437,7 +437,7 @@ class NNUEExporter:
                     input_zero_point=0,
                 )
 
-        x = test_data.numpy()
+        x = test_data.cpu().numpy()
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 64, 1280)
         
