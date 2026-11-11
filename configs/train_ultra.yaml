@@ -214,11 +214,13 @@ smoke_test:
 # Advanced features
 advanced:
   # Data augmentation (board symmetries)
+  # NOTE: color_flip disabled - correct HalfKAv2_hm remapping requires
+  # feature index mapping not yet implemented. x[::-1] would corrupt data.
   augmentations:
     flip_horizontal: true
     flip_vertical: true
     rotate_180: true
-    color_flip: true
+    color_flip: false
 
   # Overfitting detection (warns if model is memorizing instead of learning)
   overfitting:

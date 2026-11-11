@@ -216,7 +216,8 @@ class NNUELightningModule(pl.LightningModule):
         if self.config.get("hardware", {}).get("compile_model", True):
             compile_mode = self.config.get("hardware", {}).get("compile_mode", "max-autotune")
             try:
-                self.model = torch.compile(self.model, mode=compile_mode)
+                # fullgraph=False for robustness - allows Python fallbacks
+                self.model = torch.compile(self.model, mode=compile_mode, fullgraph=False)
                 print(f"Model compiled with torch.compile(mode={compile_mode})")
             except Exception as e:
                 print(f"torch.compile failed: {e}")
@@ -390,28 +391,32 @@ class NNUELightningModule(pl.LightningModule):
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step using EMA model."""
-        features = batch["features"]
-        wdl_target = batch["wdl"]
-        eval_target = batch["eval"]
+        features = batch["features"].to(self.device, non_blocking=True)
+        wdl_target = batch["wdl"].to(self.device, non_blocking=True)
+        eval_target = batch["eval"].to(self.device, non_blocking=True)
         
         # Use EMA model for validation
         model = self.ema_model if self.ema_model is not None else self.model
         was_training = model.training
         model.eval()
         
+        # Save RNG state so validation doesn't affect training lambda jitter
+        lambda_rng_state = self._lambda_rng.get_state()
+        
         try:
             with torch.inference_mode():
                 eval_pred = model(features)
                 wdl_logits = self._eval_to_wdl_logits(eval_pred)
                 
-                # Use the same lambda as training (already computed for this step)
-                lambda_val = self._get_lambda()
+                # Use a FIXED lambda for validation (don't consume training RNG jitter)
+                lambda_val = self.start_lambda
                 loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
                 loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
                 loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         finally:
-            # Restore training mode
+            # Restore training mode and RNG state
             model.train(was_training)
+            self._lambda_rng.set_state(lambda_rng_state)
         
         self.log("val/loss_wdl", loss_wdl, prog_bar=True, sync_dist=True)
         self.log("val/loss_eval", loss_eval, prog_bar=True, sync_dist=True)
@@ -507,18 +512,22 @@ class NNUELightningModule(pl.LightningModule):
         }
 
     def on_before_optimizer_step(self, optimizer):
-        """Log learning rate and apply gradient clipping before optimizer step."""
+        """Log learning rate before optimizer step.
+        
+        NOTE: Gradient clipping is handled by PL's gradient_clip_val config.
+        Manual clipping here was removed to avoid double-clipping which can
+        hurt gradient flow and slow convergence.
+        """
         # Log current LR for progress bar (every optimizer step)
         lr = optimizer.param_groups[0]['lr']
         self.log("lr", lr, prog_bar=True, sync_dist=True)
-        
-        # Gradient clipping (PL does this automatically but we add explicit safety)
-        grad_clip_val = self.config.get("training", {}).get("gradient_clip_val", 1.0)
-        if grad_clip_val > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip_val)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         """Save custom state."""
+        # time_elapsed is tracked cumulatively; don't double-count
+        elapsed = time.time() - self._global_start_time
+        self.training_state.time_elapsed = elapsed
+        
         checkpoint["training_state"] = {
             "step": self.training_state.step,
             "epoch": self.training_state.epoch,
@@ -528,7 +537,7 @@ class NNUELightningModule(pl.LightningModule):
             "val_losses": self.training_state.val_losses,
             "lr_history": self.training_state.lr_history,
             "lambda_history": self.training_state.lambda_history,
-            "time_elapsed": self.training_state.time_elapsed + (time.time() - self._global_start_time),
+            "time_elapsed": self.training_state.time_elapsed,
         }
         
         # Save EMA state

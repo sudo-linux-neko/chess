@@ -208,7 +208,9 @@ class NNUEModel(nn.Module):
         """Compile model with torch.compile for speed."""
         if hasattr(torch, 'compile'):
             try:
-                self = torch.compile(self, mode=mode, fullgraph=True)
+                # fullgraph=False allows Python fallbacks for unsupported ops
+                # while still getting major speedup from graph capture
+                self = torch.compile(self, mode=mode, fullgraph=False)
                 print(f"Model compiled with torch.compile(mode={mode})")
             except Exception as e:
                 print(f"torch.compile failed: {e}")

@@ -307,46 +307,35 @@ class StreamingBinpackDataset(IterableDataset):
         return (np.array(features), np.array(weights), np.array(wdl), eval_cp, game_result)
 
     def _apply_augmentations(self, features: np.ndarray, rng: random.Random) -> np.ndarray:
-        """Apply board symmetry augmentations."""
+        """Apply board symmetry augmentations (vectorized NumPy for speed)."""
         if not self.augmentations:
             return features
 
         # Reshape to (64, 1280) for bucket-wise ops
         x = features.reshape(64, 1280).copy()
 
+        # Pre-compute flip indices for vectorized operations
+        # King square index = rank * 8 + file (rank 0-7, file 0-7)
+        # Horizontal flip: rank * 8 + (7 - file)
+        # Vertical flip: (7 - rank) * 8 + file
+        flip_h_idx = np.array([r * 8 + (7 - f) for r in range(8) for f in range(8)], dtype=np.int32)
+        flip_v_idx = np.array([(7 - r) * 8 + f for r in range(8) for f in range(8)], dtype=np.int32)
+
         # Horizontal flip (flip file: a<->h, b<->g, etc.)
-        # King buckets 0-63 map to squares a1-h8, flip horizontally = flip within each rank
         if self.augmentations.get("flip_horizontal", False) and rng.random() < 0.5:
-            # Flip horizontally: for each rank (8 squares), reverse the file order
-            # King square index = rank * 8 + file
-            # Flipped: rank * 8 + (7 - file)
-            x_flipped = np.zeros_like(x)
-            for rank in range(8):
-                for file in range(8):
-                    src_idx = rank * 8 + file
-                    dst_idx = rank * 8 + (7 - file)
-                    x_flipped[dst_idx] = x[src_idx]
-            x = x_flipped
+            x = x[flip_h_idx]
 
         # Vertical flip (flip rank: 1<->8, 2<->7, etc.)
         if self.augmentations.get("flip_vertical", False) and rng.random() < 0.5:
-            # Flip vertically: reverse rank order
-            # King square index = rank * 8 + file
-            # Flipped: (7 - rank) * 8 + file
-            x_flipped = np.zeros_like(x)
-            for rank in range(8):
-                for file in range(8):
-                    src_idx = rank * 8 + file
-                    dst_idx = (7 - rank) * 8 + file
-                    x_flipped[dst_idx] = x[src_idx]
-            x = x_flipped
+            x = x[flip_v_idx]
 
         # Color flip (swap sides) - requires feature index remapping
         # For HalfKAv2, this is complex as it involves swapping white/black piece features
+        # Disabled by default in config - x[::-1] would corrupt data
         if self.augmentations.get("color_flip", False) and rng.random() < 0.5:
-            # Simplified: just swap the perspective by flipping both axes
-            # Full implementation would need feature index mapping
-            x = x[::-1].copy()  # Placeholder
+            # Placeholder - not implemented correctly for HalfKAv2_hm
+            # Would need proper feature index remapping
+            pass
 
         return x.reshape(-1)
 
@@ -373,7 +362,14 @@ class StreamingBinpackDataset(IterableDataset):
         feature_indices = features.astype(np.int32)
         feature_weights = weights.astype(np.float32)
         
-        dense_features = np.zeros(81920, dtype=np.float32)
+        # Reuse thread-local buffer to avoid per-position allocation (~327KB each)
+        if not hasattr(self, '_dense_buffer'):
+            self._dense_buffer = threading.local()
+        if not hasattr(self._dense_buffer, 'buf'):
+            self._dense_buffer.buf = np.zeros(81920, dtype=np.float32)
+        dense_features = self._dense_buffer.buf
+        dense_features.fill(0.0)
+        
         # Bounds check for safety
         valid_mask = (feature_indices >= 0) & (feature_indices < 81920)
         dense_features[feature_indices[valid_mask]] = feature_weights[valid_mask]
@@ -382,7 +378,7 @@ class StreamingBinpackDataset(IterableDataset):
         dense_features = self._apply_augmentations(dense_features, rng)
 
         return {
-            "features": torch.from_numpy(dense_features),
+            "features": torch.from_numpy(dense_features.copy()),  # copy since buffer is reused
             "wdl": torch.from_numpy(wdl).float(),
             "eval": torch.tensor(eval_cp, dtype=torch.float32),
             "game_result": torch.tensor(game_result, dtype=torch.long),
