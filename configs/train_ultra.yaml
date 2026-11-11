@@ -7,8 +7,8 @@
 
 hardware:
   gpus: 2
-  num_workers: 16
-  prefetch_factor: 8
+  num_workers: 24                    # Increased for max CPU parallelism
+  prefetch_factor: 16                # Increased to keep GPUs fed
   persistent_workers: true
   pin_memory: true
   compile_model: true
@@ -16,6 +16,7 @@ hardware:
   fp16: true
   tf32: true
   benchmark_cudnn: true
+  matmul_precision: "high"           # TF32 matmul precision for T4
 
 time_budget:
   hours: 9.5
@@ -30,7 +31,7 @@ data:
   data_dir: "/kaggle/working/data"
   max_data_gb: 10
   num_files_simultaneous: 6
-  shuffle_buffer_mb: 1024
+  shuffle_buffer_mb: 2048            # Larger shuffle buffer for better mixing with bigger batches
   drop_last_batch: true
   # Streaming data management (for limited disk space)
   streaming:
@@ -96,8 +97,8 @@ model:
   dropout: 0.0
 
 training:
-  batch_size: 65536
-  micro_batch_size: 8192
+  batch_size: 131072                 # Total effective batch across 2 GPUs
+  micro_batch_size: 16384            # Per-GPU per-step (2x increase - T4 16GB handles it)
   learning_rate: 0.0008
   weight_decay: 4e-5
   wdl_lambda: 0.55
@@ -233,8 +234,8 @@ advanced:
     enabled: true
     dtype: "float16"
 
-  # Gradient accumulation (effective batch = micro_batch * accum_steps)
-  gradient_accumulation: 8
+  # Gradient accumulation (effective batch = micro_batch * accum_steps per GPU)
+  gradient_accumulation: 4
 
   # EMA model for evaluation
   ema:

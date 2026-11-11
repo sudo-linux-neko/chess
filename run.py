@@ -159,6 +159,10 @@ def main():
     random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        # Enable TF32 for faster matmul on T4 (Ampere+)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
 
     # Handle special modes
     if args.compile_only:

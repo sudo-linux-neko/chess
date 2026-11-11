@@ -207,6 +207,12 @@ class NNUELightningModule(pl.LightningModule):
 
     def setup(self, stage: Optional[str] = None):
         """Setup called after model is moved to device."""
+        # Enable TF32 for faster matmul on T4 (Ampere+)
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.set_float32_matmul_precision('high')
+        
         # Create EMA model
         if self.config.get("advanced", {}).get("ema", {}).get("enabled", True):
             self.ema_model = self.model.create_ema()
@@ -291,7 +297,7 @@ class NNUELightningModule(pl.LightningModule):
         
         # Update training state
         self.training_state.step += 1
-        self.training_state.samples_seen += self.batch_size
+        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps
         
         # Checkpointing
         self._maybe_checkpoint()
