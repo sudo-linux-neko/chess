@@ -418,7 +418,6 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                     filename=latest,
                     repo_type="model",
                     local_dir=config["checkpoint"]["dir"],
-                    local_dir_use_symlinks=False,
                 )
                 return local_path
     except Exception as e:

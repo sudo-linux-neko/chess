@@ -685,7 +685,6 @@ class StreamingDataManager:
                 repo_type="dataset",
                 local_dir=str(self.data_dir),
                 cache_dir=str(self.data_dir),
-                resume_download=True,
                 force_download=False,
             )
             
@@ -1063,7 +1062,6 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     repo_type="dataset",
                     local_dir=str(data_dir),
                     cache_dir=str(data_dir),
-                    resume_download=True,
                     force_download=False,
                 )
                 downloaded.append(Path(local_path))

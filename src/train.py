@@ -38,6 +38,7 @@ except ImportError:
 from src.model import NNUEModel
 from src.checkpoint import CheckpointManager
 from src.hf_upload import HFUploader
+from src.data import create_dataloader
 
 
 @dataclass
@@ -139,11 +140,13 @@ class NNUELightningModule(pl.LightningModule):
         config: Dict[str, Any],
         checkpoint_manager: CheckpointManager,
         hf_uploader: HFUploader,
+        streaming_manager: Optional[Any] = None,
     ):
         super().__init__()
         self.config = config
         self.checkpoint_manager = checkpoint_manager
         self.hf_uploader = hf_uploader
+        self.streaming_manager = streaming_manager
         
         # Model
         self.model = NNUEModel(config)
@@ -424,6 +427,26 @@ class NNUELightningModule(pl.LightningModule):
                 self.training_state.val_losses.append(val_loss.item())
                 if val_loss < self.training_state.best_val_loss:
                     self.training_state.best_val_loss = val_loss.item()
+
+    def train_dataloader(self):
+        """Return training dataloader."""
+        return create_dataloader(
+            self.config,
+            streaming_manager=self.streaming_manager,
+            is_train=True,
+        )
+
+    def val_dataloader(self):
+        """Return validation dataloader (uses a small subset for fast validation)."""
+        # Create a separate validation dataloader with fewer files for speed
+        val_config = dict(self.config)
+        val_cfg = val_config.get("data", {})
+        val_cfg["num_files_simultaneous"] = min(val_cfg.get("num_files_simultaneous", 6), 2)
+        return create_dataloader(
+            val_config,
+            streaming_manager=self.streaming_manager,
+            is_train=False,
+        )
 
     def configure_optimizers(self):
         """Configure optimizer and LR scheduler."""

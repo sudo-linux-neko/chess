@@ -310,7 +310,7 @@ def run_full_training(config, is_kaggle):
         return 1
 
     try:
-        pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader)
+        pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader, streaming_manager=streaming_manager)
     except Exception as e:
         print(f"  ERROR: LightningModule creation failed: {e}")
         return 1
