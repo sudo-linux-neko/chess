@@ -104,15 +104,20 @@ class NNUEExporter:
         calibration_data: Optional[torch.Tensor] = None,
         use_ema: bool = False,
     ) -> Path:
-        model.eval()
+        # Handle torch.compile wrapped models
+        original_model = model
+        if hasattr(model, '_orig_mod'):
+            original_model = model._orig_mod
+        
+        original_model.eval()
 
         # Use EMA model if available and requested
-        if use_ema and hasattr(model, 'ema_model') and model.ema_model is not None:
+        if use_ema and hasattr(original_model, 'ema_model') and original_model.ema_model is not None:
             print("Exporting EMA model for better playing strength")
-            model = model.ema_model
-            model.eval()
+            original_model = original_model.ema_model
+            original_model.eval()
 
-        network_hash = self._compute_network_hash(model)
+        network_hash = self._compute_network_hash(original_model)
         filename = f"nn-{network_hash[:16]}.nnue"
         output_path = self.output_dir / filename
 
@@ -121,10 +126,10 @@ class NNUEExporter:
         print(f"  Using EMA: {use_ema}")
 
         if self.quantize:
-            quantized_layers = self._quantize_model(model, calibration_data)
+            quantized_layers = self._quantize_model(original_model, calibration_data)
             self._write_nnue_file(output_path, quantized_layers, network_hash)
         else:
-            self._write_nnue_float(output_path, model, network_hash)
+            self._write_nnue_float(output_path, original_model, network_hash)
 
         print(f"Export complete: {output_path} ({output_path.stat().st_size / 1024:.1f} KB)")
         return output_path
@@ -171,7 +176,7 @@ class NNUEExporter:
         bias_q = np.round(bias / scales).astype(np.int32)
 
         # Verify quantization accuracy if calibration data provided
-        if calibration_data is not None and name != "output":
+        if calibration_data is not None:
             self._verify_quantization(layer, weight_q, bias_q, scales, calibration_data, name)
 
         return QuantizedLayer(
@@ -278,6 +283,9 @@ class NNUEExporter:
         hasher = hashlib.sha256()
         for param in model.parameters():
             hasher.update(param.data.cpu().numpy().tobytes())
+        # Include architecture config for uniqueness
+        arch_str = f"{model.config.get('model', {})}"
+        hasher.update(arch_str.encode())
         return hasher.hexdigest()
 
     def verify_export(

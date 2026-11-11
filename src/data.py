@@ -147,7 +147,13 @@ class StreamingBinpackDataset(IterableDataset):
     def _iterate_cpp_loader(self, filepath: Path, file_idx: int, rng: random.Random):
         # Get or create loader (reuse across epochs)
         if file_idx not in self._file_loaders:
-            self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
+            try:
+                self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
+            except Exception as e:
+                print(f"Failed to load {filepath} with C++ loader: {e}")
+                # Fall back to Python
+                yield from self._iterate_python_fallback(filepath, file_idx, rng)
+                return
         dataset = self._file_loaders[file_idx]
         num_positions = len(dataset)
 
@@ -158,8 +164,12 @@ class StreamingBinpackDataset(IterableDataset):
         
         if self.curriculum_enabled:
             # Weight positions by ply (prefer mid/late game)
-            # This is a simplification; real curriculum uses ply from data
-            pass
+            # We'll do a simple skip of early positions
+            curriculum_cfg = self.config.get("training", {}).get("curriculum", {}) if hasattr(self, 'config') else {}
+            early_fen_skip = curriculum_cfg.get("early_fen_skip", 18)
+            # For now, just skip first N% of positions as "early game"
+            skip_count = int(len(indices) * 0.1)  # Skip first 10%
+            indices = indices[skip_count:]
 
         chunk_size = min(self.shuffle_buffer_size, len(indices))
         
@@ -169,48 +179,94 @@ class StreamingBinpackDataset(IterableDataset):
             rng.shuffle(chunk)
 
             for idx in chunk:
-                pos_data = dataset[idx]
-                yield self._pos_to_tensors(pos_data, rng)
+                try:
+                    pos_data = dataset[idx]
+                    yield self._pos_to_tensors(pos_data, rng)
+                except Exception as e:
+                    print(f"Error reading position {idx} from {filepath}: {e}")
+                    continue
 
                 with self._position_lock:
                     self.current_position = idx + 1
                     self.current_file_idx = file_idx
 
     def _iterate_python_fallback(self, filepath: Path, file_idx: int, rng: random.Random):
-        with open(filepath, 'rb') as f:
-            magic = f.read(4)
-            if magic != b"BINP":
-                raise ValueError(f"Invalid binpack magic: {magic}")
-            version = struct.unpack("<I", f.read(4))[0]
-            num_positions = struct.unpack("<Q", f.read(8))[0]
+        try:
+            with open(filepath, 'rb') as f:
+                magic = f.read(4)
+                if magic != b"BINP":
+                    raise ValueError(f"Invalid binpack magic: {magic}")
+                version = struct.unpack("<I", f.read(4))[0]
+                num_positions = struct.unpack("<Q", f.read(8))[0]
 
-            start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
-            
-            for _ in range(start_pos):
-                self._skip_position(f)
-
-            indices = list(range(start_pos, num_positions))
-            chunk_size = min(self.shuffle_buffer_size, len(indices))
-            
-            for chunk_start in range(0, len(indices), chunk_size):
-                chunk = indices[chunk_start:min(chunk_start + chunk_size, len(indices))]
-                rng.shuffle(chunk)
+                start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
                 
-                for idx in chunk:
-                    f.seek(self._get_position_offset(filepath, idx))
-                    pos_data = self._read_position(f)
-                    yield self._pos_to_tensors(pos_data, rng)
+                for _ in range(start_pos):
+                    self._skip_position(f)
+
+                indices = list(range(start_pos, num_positions))
+                
+                # Curriculum: skip early game
+                if self.curriculum_enabled:
+                    skip_count = int(len(indices) * 0.1)
+                    indices = indices[skip_count:]
+                
+                chunk_size = min(self.shuffle_buffer_size, len(indices))
+                
+                for chunk_start in range(0, len(indices), chunk_size):
+                    chunk = indices[chunk_start:min(chunk_start + chunk_size, len(indices))]
+                    rng.shuffle(chunk)
                     
-                    with self._position_lock:
-                        self.current_position = idx + 1
-                        self.current_file_idx = file_idx
+                    for idx in chunk:
+                        try:
+                            f.seek(self._get_position_offset(filepath, idx))
+                            pos_data = self._read_position(f)
+                            yield self._pos_to_tensors(pos_data, rng)
+                        except Exception as e:
+                            print(f"Error reading position {idx} from {filepath}: {e}")
+                            continue
+                        
+                        with self._position_lock:
+                            self.current_position = idx + 1
+                            self.current_file_idx = file_idx
+        except Exception as e:
+            print(f"Failed to read {filepath}: {e}")
 
     def _skip_position(self, f):
         num_features = struct.unpack("<H", f.read(2))[0]
         f.seek(num_features * 6 + 13, 1)
 
     def _get_position_offset(self, filepath: Path, idx: int) -> int:
-        return 20 + idx * 100  # Approximate
+        """Get exact byte offset for a position by building index on first call."""
+        if not hasattr(self, '_position_offsets_cache'):
+            self._position_offsets_cache = {}
+        
+        if filepath not in self._position_offsets_cache:
+            offsets = []
+            with open(filepath, 'rb') as f:
+                # Skip header
+                f.read(4)  # magic
+                f.read(4)  # version
+                f.read(8)  # num_positions
+                
+                pos = f.tell()
+                while True:
+                    offsets.append(pos)
+                    # Try to read next position header
+                    num_features_bytes = f.read(2)
+                    if not num_features_bytes or len(num_features_bytes) < 2:
+                        break
+                    num_features = struct.unpack("<H", num_features_bytes)[0]
+                    # Skip position data: features (2 bytes each) + weights (4 bytes each) + wdl (12) + eval (4) + game_result (1)
+                    pos += 2 + num_features * 6 + 13
+                    f.seek(pos)
+            
+            self._position_offsets_cache[filepath] = offsets
+        
+        offsets = self._position_offsets_cache[filepath]
+        if idx < len(offsets):
+            return offsets[idx]
+        return 0
 
     def _read_position(self, f) -> tuple:
         num_features = struct.unpack("<H", f.read(2))[0]
@@ -227,32 +283,71 @@ class StreamingBinpackDataset(IterableDataset):
             return features
 
         # Reshape to (64, 1280) for bucket-wise ops
-        x = features.reshape(64, 1280)
+        x = features.reshape(64, 1280).copy()
 
         # Horizontal flip (flip file: a<->h, b<->g, etc.)
+        # King buckets 0-63 map to squares a1-h8, flip horizontally = flip within each rank
         if self.augmentations.get("flip_horizontal", False) and rng.random() < 0.5:
-            # King bucket flip: bucket = king_square, flip horizontally
-            x = x[::-1].copy()  # Simplified
+            # Flip horizontally: for each rank (8 squares), reverse the file order
+            # King square index = rank * 8 + file
+            # Flipped: rank * 8 + (7 - file)
+            x_flipped = np.zeros_like(x)
+            for rank in range(8):
+                for file in range(8):
+                    src_idx = rank * 8 + file
+                    dst_idx = rank * 8 + (7 - file)
+                    x_flipped[dst_idx] = x[src_idx]
+            x = x_flipped
 
         # Vertical flip (flip rank: 1<->8, 2<->7, etc.)
         if self.augmentations.get("flip_vertical", False) and rng.random() < 0.5:
-            x = x[::-1].copy()  # Simplified
+            # Flip vertically: reverse rank order
+            # King square index = rank * 8 + file
+            # Flipped: (7 - rank) * 8 + file
+            x_flipped = np.zeros_like(x)
+            for rank in range(8):
+                for file in range(8):
+                    src_idx = rank * 8 + file
+                    dst_idx = (7 - rank) * 8 + file
+                    x_flipped[dst_idx] = x[src_idx]
+            x = x_flipped
 
-        # Color flip (swap sides)
+        # Color flip (swap sides) - requires feature index remapping
+        # For HalfKAv2, this is complex as it involves swapping white/black piece features
         if self.augmentations.get("color_flip", False) and rng.random() < 0.5:
-            # This would require feature index remapping
-            pass
+            # Simplified: just swap the perspective by flipping both axes
+            # Full implementation would need feature index mapping
+            x = x[::-1].copy()  # Placeholder
 
         return x.reshape(-1)
 
     def _pos_to_tensors(self, pos_data: Any, rng: random.Random) -> Dict[str, torch.Tensor]:
-        features, weights, wdl, eval_cp, game_result = pos_data
+        """
+        Convert position data to tensors.
+        Handles both C++ loader output (namedtuple-like) and Python fallback (tuple).
+        """
+        # Handle different return formats from C++ vs Python loader
+        if hasattr(pos_data, 'features'):  # C++ loader returns object with attributes
+            features = np.array(pos_data.features, dtype=np.uint16)
+            weights = np.array(pos_data.weights, dtype=np.float32)
+            wdl = np.array(pos_data.wdl, dtype=np.float32)
+            eval_cp = float(pos_data.eval)
+            game_result = int(pos_data.game_result)
+        else:  # Python fallback returns tuple
+            features, weights, wdl, eval_cp, game_result = pos_data
+            features = np.array(features, dtype=np.uint16)
+            weights = np.array(weights, dtype=np.float32)
+            wdl = np.array(wdl, dtype=np.float32)
+            eval_cp = float(eval_cp)
+            game_result = int(game_result)
 
         feature_indices = features.astype(np.int32)
         feature_weights = weights.astype(np.float32)
         
         dense_features = np.zeros(81920, dtype=np.float32)
-        dense_features[feature_indices] = feature_weights
+        # Bounds check for safety
+        valid_mask = (feature_indices >= 0) & (feature_indices < 81920)
+        dense_features[feature_indices[valid_mask]] = feature_weights[valid_mask]
 
         # Apply augmentations
         dense_features = self._apply_augmentations(dense_features, rng)

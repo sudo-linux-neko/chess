@@ -392,7 +392,19 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
     # Try HF Hub
     try:
         from huggingface_hub import list_repo_files, hf_hub_download
-        repo_id = config.get("hf", {}).get("repo_id", "")
+        hf_cfg = config.get("hf", {})
+        repo_id = hf_cfg.get("repo_id", "")
+        # If no repo_id, try to construct from username (same logic as HFUploader)
+        if not repo_id:
+            token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
+            if token:
+                from huggingface_hub import HfApi
+                api = HfApi(token=token)
+                user_info = api.whoami(token=token)
+                username = user_info.get("name") or user_info.get("user", {}).get("name")
+                if username:
+                    repo_id = f"{username}/{hf_cfg.get('repo_name', 'chess-nnue')}"
+        
         if repo_id:
             files = list_repo_files(repo_id=repo_id, repo_type="model")
             ckpt_files = [f for f in files if f.endswith(".pt") and "step_" in f]

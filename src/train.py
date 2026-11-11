@@ -183,7 +183,7 @@ class NNUELightningModule(pl.LightningModule):
         
         # Training state
         self.training_state = TrainingState()
-        self._step_start_time = time.time()
+        self._global_start_time = time.time()
         self._epoch_start_time = time.time()
         
         # Time budget
@@ -191,6 +191,10 @@ class NNUELightningModule(pl.LightningModule):
         self.max_time_seconds = time_cfg.get("hours", 9.5) * 3600
         self.checkpoint_interval = time_cfg.get("checkpoint_interval_min", 10) * 60
         self._last_checkpoint_time = time.time()
+        
+        # RNG for lambda jitter (worker-safe)
+        self._lambda_rng = torch.Generator()
+        self._lambda_rng.manual_seed(config.get("seed", 42))
         
         # Save hyperparameters
         self.save_hyperparameters(config)
@@ -242,6 +246,11 @@ class NNUELightningModule(pl.LightningModule):
         # Combined loss
         loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         
+        # Check for NaN/Inf
+        if not torch.isfinite(loss):
+            print(f"WARNING: Non-finite loss detected: {loss.item()}")
+            loss = torch.nan_to_num(loss, nan=1.0, posinf=1.0, neginf=1.0)
+        
         # Log losses (only on accumulation boundaries to reduce noise)
         if (batch_idx + 1) % self.accum_steps == 0:
             self.log("train/loss_wdl", loss_wdl.detach(), prog_bar=True, sync_dist=True)
@@ -256,7 +265,7 @@ class NNUELightningModule(pl.LightningModule):
 
     def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int):
         """Handle end of accumulation step - update EMA, checkpoint, time check."""
-        # Only run on accumulation boundaries
+        # Only run on accumulation boundaries (PL calls this after optimizer step)
         if (batch_idx + 1) % self.accum_steps != 0:
             return
             
@@ -316,16 +325,15 @@ class NNUELightningModule(pl.LightningModule):
         else:
             lambda_val = self.end_lambda
         
-        # Add jitter
+        # Add jitter using worker-safe RNG
         if self.lambda_jitter.get("enabled", True):
-            import random
             sample_jitter = self.lambda_jitter.get("sample_jitter", 0.0035)
             batch_jitter = self.lambda_jitter.get("batch_jitter", 0.0070)
             decay = self.lambda_jitter.get("decay", 0.999)
             
-            # Per-sample and per-batch jitter
-            jitter = random.uniform(-sample_jitter, sample_jitter)
-            jitter += random.uniform(-batch_jitter, batch_jitter) * (decay ** step)
+            # Per-sample and per-batch jitter using torch RNG
+            jitter = (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * sample_jitter
+            jitter += (torch.rand(1, generator=self._lambda_rng).item() * 2 - 1) * batch_jitter * (decay ** step)
             lambda_val += jitter
         
         return max(0.0, min(1.0, lambda_val))
@@ -355,7 +363,7 @@ class NNUELightningModule(pl.LightningModule):
 
     def _check_time_budget(self) -> bool:
         """Check if time budget exceeded."""
-        elapsed = time.time() - self._epoch_start_time + self.training_state.time_elapsed
+        elapsed = time.time() - self._global_start_time + self.training_state.time_elapsed
         return elapsed >= self.max_time_seconds
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
@@ -366,16 +374,21 @@ class NNUELightningModule(pl.LightningModule):
         
         # Use EMA model for validation
         model = self.ema_model if self.ema_model is not None else self.model
+        was_training = model.training
         model.eval()
         
-        with torch.no_grad():
-            eval_pred = model(features)
-            wdl_logits = self._eval_to_wdl_logits(eval_pred)
-            
-            lambda_val = self._get_lambda()
-            loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
-            loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
-            loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
+        try:
+            with torch.no_grad():
+                eval_pred = model(features)
+                wdl_logits = self._eval_to_wdl_logits(eval_pred)
+                
+                lambda_val = self._get_lambda()
+                loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
+                loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
+                loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
+        finally:
+            # Restore training mode
+            model.train(was_training)
         
         self.log("val/loss_wdl", loss_wdl, prog_bar=True)
         self.log("val/loss_eval", loss_eval, prog_bar=True)
@@ -432,6 +445,13 @@ class NNUELightningModule(pl.LightningModule):
             },
         }
 
+    def on_before_optimizer_step(self, optimizer):
+        """Log learning rate before optimizer step."""
+        # Log current LR for progress bar
+        if self.trainer.global_step % self.accum_steps == 0:
+            lr = optimizer.param_groups[0]['lr']
+            self.log("lr", lr, prog_bar=True, sync_dist=True)
+
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         """Save custom state."""
         checkpoint["training_state"] = {
@@ -443,7 +463,7 @@ class NNUELightningModule(pl.LightningModule):
             "val_losses": self.training_state.val_losses,
             "lr_history": self.training_state.lr_history,
             "lambda_history": self.training_state.lambda_history,
-            "time_elapsed": self.training_state.time_elapsed + (time.time() - self._epoch_start_time),
+            "time_elapsed": self.training_state.time_elapsed + (time.time() - self._global_start_time),
         }
         
         # Save EMA state

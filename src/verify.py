@@ -103,21 +103,33 @@ class ExportVerifier:
         # Prepare data for Rust
         test_np = test_data.numpy().astype(np.float32)
         
-        # Create Rust quantized NNUE
-        rust_nnue = self.RustQuantizedNNUE(
-            ft_weight=layers["feature_transformer"]["weight"],
-            ft_bias=layers["feature_transformer"]["bias"],
-            ft_scale=layers["feature_transformer"]["scale"],
-            h1_weight=layers["hidden1"]["weight"],
-            h1_bias=layers["hidden1"]["bias"],
-            h1_scale=layers["hidden1"]["scale"],
-            h2_weight=layers["hidden2"]["weight"],
-            h2_bias=layers["hidden2"]["bias"],
-            h2_scale=layers["hidden2"]["scale"],
-            out_weight=layers["output"]["weight"],
-            out_bias=layers["output"]["bias"],
-            out_scale=layers["output"]["scale"],
-        )
+        # Create Rust quantized NNUE - try both possible APIs
+        try:
+            rust_nnue = self.RustQuantizedNNUE(
+                ft_weight=layers["feature_transformer"]["weight"],
+                ft_bias=layers["feature_transformer"]["bias"],
+                ft_scale=layers["feature_transformer"]["scale"],
+                h1_weight=layers["hidden1"]["weight"],
+                h1_bias=layers["hidden1"]["bias"],
+                h1_scale=layers["hidden1"]["scale"],
+                h2_weight=layers["hidden2"]["weight"],
+                h2_bias=layers["hidden2"]["bias"],
+                h2_scale=layers["hidden2"]["scale"],
+                out_weight=layers["output"]["weight"],
+                out_bias=layers["output"]["bias"],
+                out_scale=layers["output"]["scale"],
+            )
+        except TypeError:
+            # Try alternative API with QuantizedLayer objects
+            from src.export import QuantizedLayer
+            qlayers = {
+                name: QuantizedLayer(
+                    weight=layers[name]["weight"],
+                    bias=layers[name]["bias"],
+                    scale=layers[name]["scale"],
+                ) for name in layers
+            }
+            rust_nnue = self.RustQuantizedNNUE(qlayers)
         
         # Forward pass
         result = rust_nnue.forward(test_np)

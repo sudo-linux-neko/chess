@@ -258,6 +258,9 @@ def run_smoke_test(config: dict) -> int:
     config["time_budget"]["checkpoint_interval_min"] = smoke_cfg.get("checkpoint_interval_min", 1)
     config["hardware"]["num_workers"] = smoke_cfg.get("num_workers", 0)
     config["hardware"]["compile_model"] = False
+    # Ensure wdl_lambda exists
+    if "wdl_lambda" not in config["training"]:
+        config["training"]["wdl_lambda"] = 0.55
 
     if not compile_cpp_loader():
         print("WARNING: C++ loader compilation failed")
@@ -380,6 +383,17 @@ def run_training(config: dict) -> int:
     print("Press Ctrl+C for graceful shutdown (saves checkpoint)")
     start = time.time()
 
+    # Setup signal handler for graceful shutdown
+    shutdown_requested = False
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        print("\nReceived interrupt signal, saving checkpoint...")
+        shutdown_requested = True
+        trainer.should_stop = True
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     try:
         trainer.fit(pl_module)
     except KeyboardInterrupt:
@@ -429,7 +443,7 @@ def run_training(config: dict) -> int:
         except Exception as e:
             print(f"Verification error: {e}")
 
-    hf_uploader.queue_export_upload(nnue_path)
+    hf_uploader.queue_export(nnue_path)
     hf_uploader.shutdown(wait=True)
 
     print("\n" + "=" * 60)

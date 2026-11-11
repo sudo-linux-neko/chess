@@ -358,8 +358,9 @@ def create_uploader(config: Dict[str, Any]) -> HFUploader:
     hf_cfg = config.get("hf", {})
     token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
     
-    if token and hf_cfg.get("repo_id"):
+    # Check if we have token (repo_id can be auto-generated from username)
+    if token:
         return HFUploader(config)
     else:
-        print("No HF token or repo_id configured, using FakeHFUploader")
+        print("No HF token configured, using FakeHFUploader")
         return FakeHFUploader(config)
