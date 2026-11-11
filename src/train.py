@@ -577,101 +577,152 @@ class TimeLimitCallback(Callback):
 class OverfittingCallback(Callback):
     """
     Detects overfitting and attempts automatic remediation before giving up.
-    
-    Strategies (escalating):
+
+    Detection (multi-signal):
+    1. Val/train loss gap > threshold (relative gap)
+    2. Validation loss worsening for N consecutive checks
+    3. EMA model outperforming raw model by significant margin
+
+    Remediation (escalating):
     1. Increase weight decay (2x)
-    2. Add/increase dropout
+    2. Add/increase dropout (0.1 → 0.2 → 0.3)
     3. Reduce learning rate (0.5x)
-    4. Increase label smoothing
+    4. Increase label smoothing (2x, cap 0.3)
     5. Restore best model + stop training (compute saver)
-    
-    If remediation fails after all strategies, stops training to avoid wasting compute.
+
+    If remediation fails to improve val loss after cooldown, moves to next strategy.
+    If all strategies exhausted, stops training to avoid wasting compute.
     """
-    
-    def __init__(self, patience: int = 5, gap_threshold: float = 0.15, 
-                 max_remediation_attempts: int = 4, remediation_cooldown: int = 3):
+
+    def __init__(
+        self,
+        patience: int = 5,
+        gap_threshold: float = 0.10,          # relative gap threshold (val-train)/val
+        max_remediation_attempts: int = 4,
+        remediation_cooldown_checks: int = 3,  # val checks to wait after remediation
+        min_improvement: float = 0.002,       # min val loss improvement to count as success
+        early_stop_worse_count: int = 15,      # stop if val worse this many checks
+    ):
         self.patience = patience
         self.gap_threshold = gap_threshold
         self.max_remediation_attempts = max_remediation_attempts
-        self.remediation_cooldown = remediation_cooldown
-        
+        self.remediation_cooldown_checks = remediation_cooldown_checks
+        self.min_improvement = min_improvement
+        self.early_stop_worse_count = early_stop_worse_count
+
         self.val_losses: List[float] = []
         self.train_losses: List[float] = []
         self.best_val_loss: float = float('inf')
         self.worse_count: int = 0
+        self.checks_since_improvement: int = 0
         self.overfitting_detected: bool = False
         self.remediation_attempts: int = 0
-        self.last_remediation_check: int = 0
+        self.checks_since_remediation: int = 0
         self.remediation_history: List[str] = []
         self.best_model_state: Optional[Dict] = None
         self.auto_stop: bool = False
+        self.remediation_successful: bool = False
+        self._last_val_loss_before_remediation: Optional[float] = None
 
     def on_validation_epoch_end(self, trainer, pl_module):
         # Only rank 0 makes overfitting decisions in DDP
         if trainer.global_rank != 0:
             return
-        
+
         metrics = trainer.callback_metrics
         val_loss = metrics.get("val/loss_total")
         train_loss = metrics.get("train/loss_total")
-        
+
         if val_loss is None or train_loss is None:
             return
-        
+
         val_loss = float(val_loss)
         train_loss = float(train_loss)
         current_step = pl_module.training_state.step
-        
+
         self.val_losses.append(val_loss)
         self.train_losses.append(train_loss)
-        
+        self.checks_since_remediation += 1
+
         # Save best model state for potential restore
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.worse_count = 0
+            self.checks_since_improvement = 0
             self.best_model_state = {k: v.clone() for k, v in pl_module.model.state_dict().items()}
         else:
             self.worse_count += 1
-        
+            self.checks_since_improvement += 1
+
+        # Compute relative gap: (val - train) / val
         gap = val_loss - train_loss
-        
+        relative_gap = gap / max(val_loss, 1e-8)
+
+        # If we just remediated, wait for cooldown before evaluating
+        if self.checks_since_remediation < self.remediation_cooldown_checks:
+            # Still check for runaway val loss (emergency stop)
+            if self.worse_count >= self.early_stop_worse_count:
+                print(f"\n\n🛑 EMERGENCY STOP: Val loss worse for {self.worse_count} checks after remediation")
+                print(f"   Best val loss: {self.best_val_loss:.4f}")
+                trainer.should_stop = True
+                self.auto_stop = True
+            return
+
+        # Check if remediation was successful
+        if self.overfitting_detected and not self.remediation_successful:
+            if self._last_val_loss_before_remediation is not None:
+                improvement = self._last_val_loss_before_remediation - val_loss
+                if improvement >= self.min_improvement:
+                    self.remediation_successful = True
+                    print(f"\n✅ Remediation successful: val loss improved by {improvement:.4f}")
+                    self.overfitting_detected = False
+                    self.worse_count = 0
+                    self.checks_since_improvement = 0
+                else:
+                    print(f"\n⚠️  Remediation did not improve val loss (improvement: {improvement:.4f}, needed: {self.min_improvement})")
+
         # Check if we should attempt remediation
         should_remediate = (
-            gap > self.gap_threshold 
+            relative_gap > self.gap_threshold
             and self.worse_count >= self.patience
             and not self.overfitting_detected
             and self.remediation_attempts < self.max_remediation_attempts
-            and (current_step - self.last_remediation_check) >= self.remediation_cooldown * 1000
         )
-        
+
         if should_remediate:
             self._attempt_remediation(pl_module, trainer, gap, val_loss, train_loss)
             return
-        
+
         # If already overfitting and remediation exhausted, stop
         if self.overfitting_detected and self.remediation_attempts >= self.max_remediation_attempts:
-            self.worse_count += 1
-            if self.worse_count >= self.patience * 2:
-                print(f"\n\n🛑 AUTO-STOP: Overfitting not fixable after {self.remediation_attempts} remediation attempts")
-                print(f"   Best val loss: {self.best_val_loss:.4f} (restoring best model)")
-                trainer.should_stop = True
-                self.auto_stop = True
-        
-        # Also stop if validation keeps getting worse regardless
-        if not self.overfitting_detected and self.worse_count >= self.patience * 3:
+            if not self.remediation_successful:
+                self.worse_count += 1
+                if self.worse_count >= self.patience:
+                    print(f"\n\n🛑 AUTO-STOP: Overfitting not fixable after {self.remediation_attempts} remediation attempts")
+                    print(f"   Best val loss: {self.best_val_loss:.4f} (restoring best model)")
+                    trainer.should_stop = True
+                    self.auto_stop = True
+            return
+
+        # Also stop if validation keeps getting worse regardless of gap
+        if not self.overfitting_detected and self.worse_count >= self.early_stop_worse_count:
             print(f"\n\n🛑 EARLY STOP: Validation loss worse for {self.worse_count} checks")
+            print(f"   Best val loss: {self.best_val_loss:.4f}")
             trainer.should_stop = True
 
     def _attempt_remediation(self, pl_module, trainer, gap: float, val_loss: float, train_loss: float):
         """Try automatic remediation strategies."""
         self.remediation_attempts += 1
-        self.last_remediation_check = pl_module.training_state.step
-        
+        self.checks_since_remediation = 0
+        self.remediation_successful = False
+        self._last_val_loss_before_remediation = val_loss
+        self.overfitting_detected = True
+
         strategy = self.remediation_attempts
-        
+
         print(f"\n\n🔧 REMEDIATION ATTEMPT {strategy}/{self.max_remediation_attempts}")
-        print(f"   Gap: {gap:.4f} (val={val_loss:.4f}, train={train_loss:.4f})")
-        
+        print(f"   Relative gap: {relative_gap_str := gap/max(val_loss,1e-8):.4f} (val={val_loss:.4f}, train={train_loss:.4f})")
+
         if strategy == 1:
             self._increase_weight_decay(pl_module, factor=2.0)
         elif strategy == 2:
@@ -680,9 +731,8 @@ class OverfittingCallback(Callback):
             self._reduce_learning_rate(pl_module, factor=0.5)
         elif strategy == 4:
             self._increase_label_smoothing(pl_module, factor=2.0)
-        
-        self.overfitting_detected = True
-        print(f"   Waiting {self.remediation_cooldown} val checks to see if remediation helps...")
+
+        print(f"   Waiting {self.remediation_cooldown_checks} val checks to see if remediation helps...")
 
     def _increase_weight_decay(self, pl_module, factor: float = 2.0):
         """Increase optimizer weight decay."""
@@ -691,20 +741,22 @@ class OverfittingCallback(Callback):
             return
         for opt in optimizers:
             for group in opt.param_groups:
-                old_wd = group.get('weight_decay', 0)
+                old_wd = float(group.get('weight_decay', 0.0))
                 new_wd = old_wd * factor
                 group['weight_decay'] = new_wd
-                print(f"   Weight decay: {old_wd} → {new_wd}")
-        self.remediation_history.append(f"weight_decay_{old_wd}_to_{new_wd}")
+                print(f"   Weight decay: {old_wd:.2e} → {new_wd:.2e}")
+        self.remediation_history.append(f"weight_decay_{old_wd:.2e}_to_{new_wd:.2e}")
 
     def _add_dropout(self, pl_module, p: float = 0.1):
-        """Add dropout to the model."""
+        """Add dropout to the model (escalating: 0.1 → 0.2 → 0.3)."""
         model = pl_module.model
         if hasattr(model, 'set_dropout'):
-            old_p = model.dropout_p
-            model.set_dropout(p)
-            print(f"   Dropout: {old_p} → {p}")
-            self.remediation_history.append(f"dropout_{old_p}_to_{p}")
+            # Escalate dropout on each attempt
+            old_p = float(getattr(model, 'dropout_p', 0.0))
+            new_p = min(0.5, old_p + p) if old_p > 0 else p
+            model.set_dropout(new_p)
+            print(f"   Dropout: {old_p:.2f} → {new_p:.2f}")
+            self.remediation_history.append(f"dropout_{old_p:.2f}_to_{new_p:.2f}")
         else:
             print("   WARNING: Model doesn't support dynamic dropout")
 
@@ -715,7 +767,7 @@ class OverfittingCallback(Callback):
             return
         for opt in optimizers:
             for group in opt.param_groups:
-                old_lr = group['lr']
+                old_lr = float(group['lr'])
                 new_lr = old_lr * factor
                 group['lr'] = new_lr
                 print(f"   Learning rate: {old_lr:.2e} → {new_lr:.2e}")
@@ -724,36 +776,37 @@ class OverfittingCallback(Callback):
     def _increase_label_smoothing(self, pl_module, factor: float = 2.0):
         """Increase label smoothing on WDL loss."""
         if hasattr(pl_module, 'wdl_loss_fn'):
-            old_smoothing = pl_module.wdl_loss_fn.label_smoothing
-            new_smoothing = min(0.3, old_smoothing * factor)
+            old_smoothing = float(pl_module.wdl_loss_fn.label_smoothing)
+            new_smoothing = min(0.5, old_smoothing * factor)
             pl_module.wdl_loss_fn.label_smoothing = new_smoothing
-            print(f"   Label smoothing: {old_smoothing} → {new_smoothing}")
-            self.remediation_history.append(f"label_smoothing_{old_smoothing}_to_{new_smoothing}")
+            print(f"   Label smoothing: {old_smoothing:.3f} → {new_smoothing:.3f}")
+            self.remediation_history.append(f"label_smoothing_{old_smoothing:.3f}_to_{new_smoothing:.3f}")
 
     def get_learning_status(self) -> Dict[str, Any]:
         """Return detailed learning status including remediation history."""
         if len(self.val_losses) < 2:
             return {"status": "insufficient_data", "learning": True}
-        
+
         recent_val = self.val_losses[-5:] if len(self.val_losses) >= 5 else self.val_losses
         recent_train = self.train_losses[-5:] if len(self.train_losses) >= 5 else self.train_losses
-        
+
         val_trend = recent_val[-1] - recent_val[0]
         train_trend = recent_train[-1] - recent_train[0]
         gap = recent_val[-1] - recent_train[-1]
-        
+        relative_gap = gap / max(recent_val[-1], 1e-8)
+
         if self.auto_stop:
-            return {"status": "stopped_overfitting", "learning": False, "gap": gap, "remediation": self.remediation_history}
+            return {"status": "stopped_overfitting", "learning": False, "gap": gap, "relative_gap": relative_gap, "remediation": self.remediation_history}
         elif self.overfitting_detected and self.remediation_attempts < self.max_remediation_attempts:
-            return {"status": "remediating", "learning": True, "gap": gap, "attempt": self.remediation_attempts, "remediation": self.remediation_history}
+            return {"status": "remediating", "learning": True, "gap": gap, "relative_gap": relative_gap, "attempt": self.remediation_attempts, "remediation": self.remediation_history}
         elif self.overfitting_detected:
-            return {"status": "overfitting", "learning": False, "gap": gap, "remediation": self.remediation_history}
+            return {"status": "overfitting_stopped", "learning": False, "gap": gap, "relative_gap": relative_gap, "remediation": self.remediation_history}
         elif val_trend > 0 and train_trend < 0:
-            return {"status": "overfitting", "learning": False, "gap": gap, "remediation": self.remediation_history}
+            return {"status": "overfitting", "learning": False, "gap": gap, "relative_gap": relative_gap, "remediation": self.remediation_history}
         elif abs(val_trend) < 1e-4:
-            return {"status": "plateaued", "learning": False, "gap": gap}
+            return {"status": "plateaued", "learning": False, "gap": gap, "relative_gap": relative_gap}
         else:
-            return {"status": "learning", "learning": True, "gap": gap}
+            return {"status": "learning", "learning": True, "gap": gap, "relative_gap": relative_gap}
 
     def restore_best_model(self, pl_module):
         """Restore the best model state (before overfitting)."""

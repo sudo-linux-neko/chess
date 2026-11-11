@@ -397,27 +397,40 @@ def run_full_training(config, is_kaggle):
     print(f"\n  Training completed in {elapsed/3600:.2f} hours")
     print(f"  Total steps: {pl_module.training_state.step}")
 
-    # Learning status report
+    # Learning status report + overfitting auto-stop handling
     print("\n" + "=" * 60)
     print("LEARNING STATUS REPORT")
     print("=" * 60)
+    overfitting_cb = None
     for cb in trainer.callbacks:
         if isinstance(cb, OverfittingCallback):
-            status = cb.get_learning_status()
-            print(f"  Status: {status['status']}")
-            print(f"  Learning: {'YES' if status['learning'] else 'NO'}")
-            if 'gap' in status:
-                print(f"  Train/Val gap: {status['gap']:.4f}")
-            print(f"  Best val loss: {cb.best_val_loss:.4f}")
-            print(f"  Val checks: {len(cb.val_losses)}")
-            if status.get('remediation'):
-                print(f"  Remediation tried: {', '.join(status['remediation'])}")
-            if status.get('attempt'):
-                print(f"  Remediation attempt: {status['attempt']}/{cb.max_remediation_attempts}")
-            if status['status'] in ('stopped_overfitting', 'overfitting') and not status['learning']:
-                print(f"  Restoring best model (val_loss={cb.best_val_loss:.4f})...")
-                cb.restore_best_model(pl_module)
+            overfitting_cb = cb
             break
+
+    if overfitting_cb:
+        status = overfitting_cb.get_learning_status()
+        print(f"  Status: {status['status']}")
+        print(f"  Learning: {'YES' if status['learning'] else 'NO'}")
+        if 'gap' in status:
+            print(f"  Train/Val gap: {status['gap']:.4f}")
+        if 'relative_gap' in status:
+            print(f"  Relative gap: {status['relative_gap']:.4f}")
+        print(f"  Best val loss: {overfitting_cb.best_val_loss:.4f}")
+        print(f"  Val checks: {len(overfitting_cb.val_losses)}")
+        if status.get('remediation'):
+            print(f"  Remediation tried: {', '.join(status['remediation'])}")
+        if status.get('attempt'):
+            print(f"  Remediation attempt: {status['attempt']}/{overfitting_cb.max_remediation_attempts}")
+
+        # If auto-stopped due to overfitting, restore best model immediately
+        if status['status'] in ('stopped_overfitting', 'overfitting_stopped') and not status['learning']:
+            print(f"\n  🛑 Training stopped early due to overfitting!")
+            print(f"  Restoring best model (val_loss={overfitting_cb.best_val_loss:.4f})...")
+            overfitting_cb.restore_best_model(pl_module)
+        elif status['status'] == 'remediating':
+            print(f"\n  ⚠️  Remediation in progress, continuing training...")
+    else:
+        print("  Overfitting callback not found")
 
     print(f"  Total steps: {pl_module.training_state.step}")
     print(f"  Total time: {elapsed/3600:.2f} hours")
