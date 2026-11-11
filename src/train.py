@@ -197,6 +197,7 @@ class NNUELightningModule(pl.LightningModule):
         self.max_time_seconds = time_cfg.get("hours", 9.5) * 3600
         self.checkpoint_interval = time_cfg.get("checkpoint_interval_min", 10) * 60
         self._last_checkpoint_time = time.time()
+        self._last_global_step = -1  # Track PL global step for accurate accumulation boundaries
         
         # RNG for lambda jitter (worker-safe)
         self._lambda_rng = torch.Generator()
@@ -284,10 +285,16 @@ class NNUELightningModule(pl.LightningModule):
 
     def on_train_batch_end(self, outputs: Any, batch: Any, batch_idx: int):
         """Handle end of accumulation step - update EMA, checkpoint, time check."""
-        # Only run on accumulation boundaries (PL calls this after optimizer step)
-        if (batch_idx + 1) % self.accum_steps != 0:
+        # Only run on optimizer step boundaries.
+        # Use trainer.global_step instead of batch_idx % accum_steps because
+        # batch_idx resets each epoch while PL's accumulation counter is global.
+        # When epoch length doesn't divide evenly by accum_steps, batch_idx-based
+        # detection misaligns with PL's actual optimizer steps.
+        current_step = self.trainer.global_step
+        if current_step == self._last_global_step:
             return
-            
+        self._last_global_step = current_step
+        
         # Update EMA
         if self.ema_model is not None:
             ema_cfg = self.config.get("advanced", {}).get("ema", {})
@@ -383,32 +390,22 @@ class NNUELightningModule(pl.LightningModule):
                 config=self.config,
                 ema_model=self.ema_model,  # Pass EMA model for checkpointing
             )
-            if ckpt_path:
-                self.hf_uploader.queue_upload(ckpt_path)
-                # Also upload metadata JSON with loss, time, step, etc.
-                meta_path = ckpt_path.with_suffix('.meta.json')
-                if meta_path.exists():
-                    self.hf_uploader.queue_upload(
-                        meta_path,
-                        remote_path=f"checkpoints/{meta_path.name}",
-                        priority=5,
-                    )
+            if ckpt_path and self.hf_uploader:
+                try:
+                    self.hf_uploader.queue_upload(ckpt_path)
+                    # Also upload metadata JSON with loss, time, step, etc.
+                    meta_path = ckpt_path.with_suffix('.meta.json')
+                    if meta_path.exists():
+                        self.hf_uploader.queue_upload(
+                            meta_path,
+                            remote_path=f"checkpoints/{meta_path.name}",
+                            priority=5,
+                        )
+                except Exception as e:
+                    print(f"Checkpoint upload failed: {e}")
         except Exception as e:
             print(f"Checkpoint save failed: {e}")
             return
-        if ckpt_path and self.hf_uploader:
-            try:
-                self.hf_uploader.queue_upload(ckpt_path)
-                # Also upload metadata JSON with loss, time, step, etc.
-                meta_path = ckpt_path.with_suffix('.meta.json')
-                if meta_path.exists():
-                    self.hf_uploader.queue_upload(
-                        meta_path,
-                        remote_path=f"checkpoints/{meta_path.name}",
-                        priority=5,
-                    )
-            except Exception as e:
-                print(f"Checkpoint upload failed: {e}")
 
     def _check_time_budget(self) -> bool:
         """Check if time budget exceeded."""

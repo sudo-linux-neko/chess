@@ -170,7 +170,7 @@ class StreamingBinpackDataset(IterableDataset):
         dataset = self._file_loaders[file_idx]
         num_positions = len(dataset)
 
-        start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
+        start_pos = self.current_position if file_idx == self.start_file else 0
 
         # Curriculum: skip early game positions based on ply
         indices = list(range(start_pos, num_positions))
@@ -222,7 +222,7 @@ class StreamingBinpackDataset(IterableDataset):
                 version = struct.unpack("<I", f.read(4))[0]
                 num_positions = struct.unpack("<Q", f.read(8))[0]
 
-                start_pos = self.current_position if file_idx == self.start_file and file_idx == 0 else 0
+                start_pos = self.current_position if file_idx == self.start_file else 0
                 
                 for _ in range(start_pos):
                     self._skip_position(f)
@@ -685,7 +685,6 @@ class StreamingDataManager:
                 filename=filepath.name,
                 repo_type="dataset",
                 local_dir=str(self.data_dir),
-                cache_dir=str(self.data_dir),
                 force_download=False,
             )
             
@@ -1056,13 +1055,12 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     break
 
                 print(f"  Downloading {filename} from HF... (attempt {attempt+1}/{max_retries})")
-                # Use cache_dir=data_dir to avoid 2x disk usage (cache + local_dir)
+                # Use local_dir only (no cache_dir to avoid conflicts and 2x disk usage)
                 local_path = hf_hub_download(
                     repo_id=repo_id,
                     filename=filename,
                     repo_type="dataset",
                     local_dir=str(data_dir),
-                    cache_dir=str(data_dir),
                     force_download=False,
                 )
                 downloaded.append(Path(local_path))
@@ -1117,6 +1115,11 @@ def compile_cpp_loader(build_dir: str = "build") -> bool:
     cpp_loader_dir = Path(__file__).parent / "cpp_loader"
     if not cpp_loader_dir.exists():
         _create_cpp_loader_structure(cpp_loader_dir)
+    
+    # Ensure __init__.py exists for import (in case dir pre-existed)
+    init_py = cpp_loader_dir / "__init__.py"
+    if not init_py.exists():
+        init_py.write_text('try:\n    from .cpp_loader import BinpackDataset\nexcept ImportError:\n    pass\n')
 
     build_path = cpp_loader_dir / build_dir
     build_path.mkdir(parents=True, exist_ok=True)
@@ -1175,6 +1178,15 @@ def compile_cpp_loader(build_dir: str = "build") -> bool:
 
 def _create_cpp_loader_structure(cpp_loader_dir: Path):
     cpp_loader_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create __init__.py so the compiled .so can be imported as `from cpp_loader import BinpackDataset`
+    init_content = '''
+try:
+    from .cpp_loader import BinpackDataset
+except ImportError:
+    pass
+'''
+    (cpp_loader_dir / "__init__.py").write_text(init_content)
 
     cmake_content = '''
 cmake_minimum_required(VERSION 3.15)
