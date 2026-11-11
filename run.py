@@ -481,9 +481,17 @@ def run_full_training(config, is_kaggle):
     nnue_path = None
     try:
         exporter = create_exporter(config)
-        test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
-        test_batch = next(iter(test_loader))
-        test_data = test_batch["features"][:100]
+        
+        # Try to get test data for export verification
+        test_data = None
+        try:
+            test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
+            test_batch = next(iter(test_loader))
+            test_data = test_batch["features"][:100]
+        except Exception as e:
+            print(f"  Warning: Could not get test data for export: {e}")
+            # Create dummy test data for export calibration
+            test_data = torch.zeros(100, 81920, dtype=torch.float32)
 
         nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
 
@@ -526,7 +534,7 @@ def run_full_training(config, is_kaggle):
         print(f"  Final model: {nnue_path}")
     print(f"  Total time: {elapsed/3600:.2f} hours")
     print(f"  Steps: {pl_module.training_state.step}")
-    if hf_uploader and hf_uploader.repo_id:
+    if hf_uploader and getattr(hf_uploader, 'repo_id', None):
         print(f"  HF Repo: {hf_uploader.repo_id}")
     print("=" * 60)
 

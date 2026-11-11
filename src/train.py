@@ -395,6 +395,20 @@ class NNUELightningModule(pl.LightningModule):
                     )
         except Exception as e:
             print(f"Checkpoint save failed: {e}")
+            return
+        if ckpt_path and self.hf_uploader:
+            try:
+                self.hf_uploader.queue_upload(ckpt_path)
+                # Also upload metadata JSON with loss, time, step, etc.
+                meta_path = ckpt_path.with_suffix('.meta.json')
+                if meta_path.exists():
+                    self.hf_uploader.queue_upload(
+                        meta_path,
+                        remote_path=f"checkpoints/{meta_path.name}",
+                        priority=5,
+                    )
+            except Exception as e:
+                print(f"Checkpoint upload failed: {e}")
 
     def _check_time_budget(self) -> bool:
         """Check if time budget exceeded."""
