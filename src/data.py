@@ -88,6 +88,7 @@ class StreamingBinpackDataset(IterableDataset):
         curriculum_enabled: bool = True,
         augmentations: Optional[Dict[str, bool]] = None,
         streaming_manager: Optional[StreamingDataManager] = None,
+        config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -101,6 +102,7 @@ class StreamingBinpackDataset(IterableDataset):
         self.curriculum_enabled = curriculum_enabled
         self.augmentations = augmentations or {}
         self.streaming_manager = streaming_manager
+        self.config = config or {}
 
         self.files = self._discover_files()
         self.current_file_idx = start_file
@@ -1282,6 +1284,7 @@ def create_dataloader(
                 curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                 augmentations=adv_cfg.get("augmentations", {}),
                 streaming_manager=streaming_manager,  # Pass for predictive prefetching
+                config=config,  # Pass config for curriculum settings
             )
             # Override file discovery to use streaming manager's active files
             dataset.files = active_files
@@ -1296,6 +1299,7 @@ def create_dataloader(
                 drop_last_batch=data_cfg.get("drop_last_batch", True),
                 curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                 augmentations=adv_cfg.get("augmentations", {}),
+                config=config,  # Pass config for curriculum settings
             )
 
     # Gradient accumulation: effective batch = micro_batch * accum_steps

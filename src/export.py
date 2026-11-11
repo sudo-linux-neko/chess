@@ -147,8 +147,8 @@ class NNUEExporter:
             quantized["feature_transformer"] = self._quantize_linear(
                 ft_layer, "feature_transformer", calibration_data
             )
-            quantized["hidden1"] = self._quantize_linear(model.hidden1[0], "hidden1", calibration_data)
-            quantized["hidden2"] = self._quantize_linear(model.hidden2[0], "hidden2", calibration_data)
+            quantized["hidden1"] = self._quantize_linear(model.hidden1_linear, "hidden1", calibration_data)
+            quantized["hidden2"] = self._quantize_linear(model.hidden2_linear, "hidden2", calibration_data)
             quantized["output"] = self._quantize_linear(model.output_layer, "output", calibration_data)
 
         return quantized
@@ -267,8 +267,8 @@ class NNUEExporter:
 
             ft = model.feature_transformer.linear
             self._write_float_layer(f, ft)
-            self._write_float_layer(f, model.hidden1[0])
-            self._write_float_layer(f, model.hidden2[0])
+            self._write_float_layer(f, model.hidden1_linear)
+            self._write_float_layer(f, model.hidden2_linear)
             self._write_float_layer(f, model.output_layer)
 
     def _write_float_layer(self, f, layer: nn.Linear):

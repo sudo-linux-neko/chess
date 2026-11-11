@@ -19,6 +19,11 @@ from typing import Optional, Dict, Any
 import math
 
 
+def _get_clipped_relu():
+    """Get optimized ClippedReLU - uses torch.compile compatible implementation."""
+    return torch.clamp
+
+
 class ClippedReLU(nn.Module):
     """ClippedReLU: min(max(x, 0), 1) - Stockfish standard activation."""
 
@@ -94,7 +99,7 @@ class FeatureTransformer(nn.Module):
         # Shared linear: (batch * 64, 256)
         acc = self.linear(x_flat)
 
-        # ClippedReLU activation
+        # ClippedReLU activation (torch.clamp is faster than custom module)
         acc = acc.clamp(min=0.0, max=1.0)
 
         # Reshape back to (batch, 64 * 256) = (batch, 16384)
@@ -120,6 +125,7 @@ class NNUEModel(nn.Module):
         super().__init__()
         self.config = config
         model_cfg = config.get("model", {})
+        self.clipped_relu_max = model_cfg.get("clipped_relu_max", 1.0)
 
         # Feature transformer (shared weights)
         self.feature_transformer = FeatureTransformer(
@@ -130,15 +136,14 @@ class NNUEModel(nn.Module):
             init_gain=model_cfg.get("init_gain", 1.0),
         )
 
-        # Hidden layers with ClippedReLU
-        self.hidden1 = nn.Sequential(
-            nn.Linear(model_cfg.get("ft_output") * model_cfg.get("num_buckets", 64), model_cfg.get("hidden1", 256)),
-            ClippedReLU(model_cfg.get("clipped_relu_max", 1.0)),
+        # Hidden layers - using separate Linear + clamp for torch.compile compatibility
+        self.hidden1_linear = nn.Linear(
+            model_cfg.get("ft_output") * model_cfg.get("num_buckets", 64), 
+            model_cfg.get("hidden1", 256)
         )
-
-        self.hidden2 = nn.Sequential(
-            nn.Linear(model_cfg.get("hidden1", 256), model_cfg.get("hidden2", 32)),
-            ClippedReLU(model_cfg.get("clipped_relu_max", 1.0)),
+        self.hidden2_linear = nn.Linear(
+            model_cfg.get("hidden1", 256), 
+            model_cfg.get("hidden2", 32)
         )
 
         # Output layer (no activation - outputs centipawns)
@@ -152,7 +157,7 @@ class NNUEModel(nn.Module):
         self.ema_decay = config.get("advanced", {}).get("ema", {}).get("decay", 0.9999)
 
     def _init_hidden_layers(self, init_type: str, gain: float):
-        for module in [self.hidden1[0], self.hidden2[0], self.output_layer]:
+        for module in [self.hidden1_linear, self.hidden2_linear, self.output_layer]:
             if isinstance(module, nn.Linear):
                 if init_type == "kaiming_normal":
                     nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
@@ -176,14 +181,24 @@ class NNUEModel(nn.Module):
         # Feature transformer: (batch, 81920) -> (batch, 16384)
         x = self.feature_transformer(x)
 
-        # Hidden layers
-        x = self.hidden1(x)  # (batch, 256)
-        x = self.hidden2(x)  # (batch, 32)
+        # Hidden layers with inline ClippedReLU (faster, torch.compile friendly)
+        x = self.hidden1_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 256)
+        x = self.hidden2_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 32)
 
         # Output
         x = self.output_layer(x)  # (batch, 1)
 
         return x
+
+    def compile_model(self, mode: str = "max-autotune") -> "NNUEModel":
+        """Compile model with torch.compile for speed."""
+        if hasattr(torch, 'compile'):
+            try:
+                self = torch.compile(self, mode=mode, fullgraph=True)
+                print(f"Model compiled with torch.compile(mode={mode})")
+            except Exception as e:
+                print(f"torch.compile failed: {e}")
+        return self
 
     def get_num_parameters(self) -> int:
         """Get number of trainable parameters."""

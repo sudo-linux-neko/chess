@@ -101,6 +101,7 @@ training:
   wdl_lambda: 0.55
   eval_delta: 100.0
   label_smoothing: 0.05
+  wdl_scale: 400.0
   max_positions: 55000000000
 
   # One-Cycle LR Schedule (from nettest)

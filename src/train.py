@@ -104,17 +104,20 @@ class WDLLoss(nn.Module):
     def __init__(self, label_smoothing: float = 0.05):
         super().__init__()
         self.label_smoothing = label_smoothing
-        self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # target: [W, D, L] probabilities or class indices
         if target.dim() == 2 and target.shape[1] == 3:
-            # Soft targets - use KL divergence
+            # Soft targets - use KL divergence with label smoothing
             log_probs = F.log_softmax(logits, dim=-1)
+            # Apply label smoothing to target distribution
+            if self.label_smoothing > 0:
+                target = target * (1 - self.label_smoothing) + self.label_smoothing / 3
+                target = target / target.sum(dim=-1, keepdim=True)
             loss = -(target * log_probs).sum(dim=-1).mean()
         else:
             # Hard targets
-            loss = self.ce(logits, target)
+            loss = F.cross_entropy(logits, target, label_smoothing=self.label_smoothing)
         return loss
 
 
@@ -292,7 +295,7 @@ class NNUELightningModule(pl.LightningModule):
         """Convert centipawn evaluation to WDL logits."""
         # Stockfish-style conversion using sigmoid
         # W = sigmoid(eval / scale), L = sigmoid(-eval / scale), D = 1 - W - L
-        scale = 400.0  # Typical scaling
+        scale = self.config.get("training", {}).get("wdl_scale", 400.0)
         w = torch.sigmoid(eval_cp / scale)
         l = torch.sigmoid(-eval_cp / scale)
         d = 1.0 - w - l
@@ -355,6 +358,7 @@ class NNUELightningModule(pl.LightningModule):
                 scaler=self.trainer.scaler if hasattr(self.trainer, 'scaler') else None,
                 training_state=self.training_state,
                 config=self.config,
+                ema_model=self.ema_model,  # Pass EMA model for checkpointing
             )
             if ckpt_path:
                 self.hf_uploader.queue_upload(ckpt_path)
@@ -382,6 +386,7 @@ class NNUELightningModule(pl.LightningModule):
                 eval_pred = model(features)
                 wdl_logits = self._eval_to_wdl_logits(eval_pred)
                 
+                # Use the same lambda as training (already computed for this step)
                 lambda_val = self._get_lambda()
                 loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
                 loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
@@ -390,9 +395,9 @@ class NNUELightningModule(pl.LightningModule):
             # Restore training mode
             model.train(was_training)
         
-        self.log("val/loss_wdl", loss_wdl, prog_bar=True)
-        self.log("val/loss_eval", loss_eval, prog_bar=True)
-        self.log("val/loss_total", loss, prog_bar=True)
+        self.log("val/loss_wdl", loss_wdl, prog_bar=True, sync_dist=True)
+        self.log("val/loss_eval", loss_eval, prog_bar=True, sync_dist=True)
+        self.log("val/loss_total", loss, prog_bar=True, sync_dist=True)
         
         return {"val_loss": loss}
 
