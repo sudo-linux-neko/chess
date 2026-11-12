@@ -439,16 +439,22 @@ class NNUEExporter:
 
         x = test_data.cpu().numpy()
         batch_size = x.shape[0]
-        x = x.reshape(batch_size, 64, 1280)
+        
+        # Get architecture dimensions from loaded layers
+        ft = layers["feature_transformer"]
+        features_per_bucket = ft.weight.shape[1]   # 1280
+        ft_output = ft.weight.shape[0]             # 256
+        h1_in = layers["hidden1"].weight.shape[1]  # 16384
+        num_buckets = h1_in // ft_output               # 64
+        
+        x = x.reshape(batch_size, num_buckets, features_per_bucket)
         
         # Feature transformer
-        ft = layers["feature_transformer"]
-        x_flat = x.reshape(-1, 1280)
+        x_flat = x.reshape(-1, features_per_bucket)
         acc = x_flat @ ft.weight.T.astype(np.float32) * ft.scale
         acc += ft.bias.astype(np.float32)
-        x = acc.reshape(batch_size, 64, 256)
+        x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
-        x = x.reshape(batch_size, -1)
         
         # Hidden1
         h1 = layers["hidden1"]

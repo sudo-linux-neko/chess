@@ -583,7 +583,7 @@ def run_export_only(config: dict) -> int:
         test_data = test_batch["features"][:100]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")
-        test_data = torch.zeros(100, config["model"]["input_dim"], dtype=torch.float32)
+        test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     nnue_path = exporter.export(model, test_data, use_ema=True)
 
@@ -627,7 +627,7 @@ def run_verify_export(config: dict) -> int:
         test_data = test_batch["features"][:config["export"]["verify_samples"]]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")
-        test_data = torch.zeros(config["export"]["verify_samples"], config["model"]["input_dim"], dtype=torch.float32)
+        test_data = torch.zeros(config["export"]["verify_samples"], config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     exporter = create_exporter(config)
     result = exporter.verify_export(model, nnue_path, test_data)

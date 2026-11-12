@@ -148,18 +148,23 @@ class ExportVerifier:
         """Pure Python quantized inference (fallback)."""
         layers = self._load_nnue_layers(nnue_path)
         
+        # Get architecture dimensions from loaded layers
+        ft = layers["feature_transformer"]
+        features_per_bucket = ft["weight"].shape[1]   # 1280 (in_features per bucket)
+        ft_output = ft["weight"].shape[0]             # 256 (out_features per bucket)
+        h1_in = layers["hidden1"]["weight"].shape[1]  # 16384 (total accumulator)
+        num_buckets = h1_in // ft_output               # 64 buckets
+        
         x = test_data.cpu().numpy()
         batch_size = x.shape[0]
-        x = x.reshape(batch_size, 64, 1280)
+        x = x.reshape(batch_size, num_buckets, features_per_bucket)
         
         # Feature transformer
-        ft = layers["feature_transformer"]
-        x_flat = x.reshape(-1, 1280)
+        x_flat = x.reshape(-1, features_per_bucket)
         acc = x_flat @ ft["weight"].T.astype(np.float32) * ft["scale"]
         acc += ft["bias"].astype(np.float32)
-        x = acc.reshape(batch_size, 64, 256)
+        x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
-        x = x.reshape(batch_size, -1)
         
         # Hidden1
         h1 = layers["hidden1"]
@@ -247,13 +252,21 @@ class ExportVerifier:
                 
                 network_hash = f.read(32)
                 
-                # Check layers
+                # Check layers - validate against expected dims from config
+                ft_cfg = self.config.get("model", {})
+                num_buckets = ft_cfg.get("num_buckets", 64)
+                features_per_bucket = ft_cfg.get("features_per_bucket", 1280)
+                ft_output = ft_cfg.get("ft_output", 256)
+                hidden1 = ft_cfg.get("hidden1", 256)
+                hidden2 = ft_cfg.get("hidden2", 32)
+                output_dim = ft_cfg.get("output_dim", 1)
+                
                 layer_names = ["feature_transformer", "hidden1", "hidden2", "output"]
                 expected_dims = [
-                    (1280, 256),   # FT: 1280 -> 256
-                    (16384, 256),  # H1: 16384 -> 256
-                    (256, 32),     # H2: 256 -> 32
-                    (32, 1),       # Out: 32 -> 1
+                    (features_per_bucket, ft_output),   # FT: features_per_bucket -> ft_output
+                    (num_buckets * ft_output, hidden1), # H1: accumulator -> hidden1
+                    (hidden1, hidden2),                 # H2: hidden1 -> hidden2
+                    (hidden2, output_dim),              # Out: hidden2 -> output_dim
                 ]
                 
                 for i, (name, (exp_in, exp_out)) in enumerate(zip(layer_names, expected_dims)):
@@ -329,16 +342,22 @@ class ExportVerifier:
         """Single forward pass for benchmarking."""
         x = test_data
         batch_size = x.shape[0]
-        x = x.reshape(batch_size, 64, 1280)
+        
+        # Get architecture dimensions from loaded layers
+        ft = layers["feature_transformer"]
+        features_per_bucket = ft["weight"].shape[1]   # 1280
+        ft_output = ft["weight"].shape[0]             # 256
+        h1_in = layers["hidden1"]["weight"].shape[1]  # 16384
+        num_buckets = h1_in // ft_output                # 64
+        
+        x = x.reshape(batch_size, num_buckets, features_per_bucket)
         
         # Feature transformer
-        ft = layers["feature_transformer"]
-        x_flat = x.reshape(-1, 1280)
+        x_flat = x.reshape(-1, features_per_bucket)
         acc = x_flat @ ft["weight"].T.astype(np.float32) * ft["scale"]
         acc += ft["bias"].astype(np.float32)
-        x = acc.reshape(batch_size, 64, 256)
+        x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
-        x = x.reshape(batch_size, -1)
         
         # Hidden1
         h1 = layers["hidden1"]
@@ -378,7 +397,7 @@ def verify_export_standalone(
     # Generate test data if not provided
     if test_data is None:
         test_data = torch.randn(config.get("export", {}).get("verify_samples", 20000), 
-                               config["model"]["input_dim"])
+                               config.get("model", {}).get("input_dim", 81920))
     
     # Verify
     verifier = ExportVerifier(config)
