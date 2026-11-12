@@ -518,7 +518,8 @@ def run_full_training(config, is_kaggle):
         except Exception as e:
             print(f"  Warning: Could not get test data for export: {e}")
             # Create dummy test data for export calibration
-            test_data = torch.zeros(100, 81920, dtype=torch.float32)
+            input_dim = config.get("model", {}).get("input_dim", 81920)
+            test_data = torch.zeros(100, input_dim, dtype=torch.float32)
 
         nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
 

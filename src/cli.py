@@ -280,7 +280,7 @@ def run_smoke_test(config: dict) -> int:
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
 
-    pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader)
+    pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader, streaming_manager=streaming_manager)
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
 
     print("\n4. Running training...")
@@ -309,9 +309,13 @@ def run_smoke_test(config: dict) -> int:
     )
     if ckpt_path:
         print(f"Checkpoint saved: {ckpt_path}")
-        hf_uploader.queue_upload(ckpt_path)
-        time.sleep(0.5)
-        hf_uploader.shutdown(wait=True)
+        if hf_uploader:
+            try:
+                hf_uploader.queue_upload(ckpt_path)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"  Upload warning: {e}")
+        hf_uploader.shutdown(wait=True) if hf_uploader else None
 
     print("\n6. Testing export...")
     exporter = create_exporter(config)
@@ -396,7 +400,7 @@ def run_training(config: dict) -> int:
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
 
-    pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader)
+    pl_module = NNUELightningModule(config, checkpoint_manager, hf_uploader, streaming_manager=streaming_manager)
 
     if resume_ckpt:
         print(f"Resuming from: {resume_ckpt}")

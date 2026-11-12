@@ -269,8 +269,8 @@ class NNUELightningModule(pl.LightningModule):
         # Check for NaN/Inf - skip step if non-finite to avoid corrupting weights
         if not torch.isfinite(loss):
             print(f"WARNING: Non-finite loss detected at step {self.training_state.step}, skipping step")
-            # Return a dummy loss that won't affect gradients
-            return torch.tensor(0.0, device=loss.device, requires_grad=True)
+            # Return loss * 0.0 to keep computation graph connected (avoids breaking grad flow)
+            return loss * 0.0
         
         # Log losses (only on accumulation boundaries to reduce noise)
         # Use trainer.global_step instead of batch_idx % accum_steps because
@@ -760,7 +760,8 @@ class OverfittingCallback(Callback):
         strategy = self.remediation_attempts
 
         print(f"\n\n🔧 REMEDIATION ATTEMPT {strategy}/{self.max_remediation_attempts}")
-        print(f"   Relative gap: {relative_gap_str := gap/max(val_loss,1e-8):.4f} (val={val_loss:.4f}, train={train_loss:.4f})")
+        rel_gap = gap / max(val_loss, 1e-8)
+        print(f"   Relative gap: {rel_gap:.4f} (val={val_loss:.4f}, train={train_loss:.4f})")
 
         if strategy == 1:
             self._increase_weight_decay(pl_module, factor=2.0)
