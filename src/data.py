@@ -316,8 +316,12 @@ class StreamingBinpackDataset(IterableDataset):
         if not self.augmentations:
             return features
 
-        # Reshape to (64, 1280) for bucket-wise ops
-        x = features.reshape(64, 1280).copy()
+        # Get architecture dimensions from config
+        num_buckets = self.config.get("model", {}).get("num_buckets", 64)
+        features_per_bucket = self.config.get("model", {}).get("features_per_bucket", 1280)
+
+        # Reshape to (num_buckets, features_per_bucket) for bucket-wise ops
+        x = features.reshape(num_buckets, features_per_bucket).copy()
 
         # Pre-compute flip indices for vectorized operations
         # King square index = rank * 8 + file (rank 0-7, file 0-7)

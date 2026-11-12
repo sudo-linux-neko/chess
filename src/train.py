@@ -269,8 +269,9 @@ class NNUELightningModule(pl.LightningModule):
         # Check for NaN/Inf - skip step if non-finite to avoid corrupting weights
         if not torch.isfinite(loss):
             print(f"WARNING: Non-finite loss detected at step {self.training_state.step}, skipping step")
-            # Return loss * 0.0 to keep computation graph connected (avoids breaking grad flow)
-            return loss * 0.0
+            # Return clean zero loss disconnected from graph - NaN * 0 = NaN, so
+            # we must NOT multiply by loss. A fresh zero tensor prevents weight corruption.
+            return torch.tensor(0.0, device=loss.device, requires_grad=True)
         
         # Log losses (only on accumulation boundaries to reduce noise)
         # Use trainer.global_step instead of batch_idx % accum_steps because

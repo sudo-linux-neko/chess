@@ -146,8 +146,9 @@ def is_rust_available() -> bool:
 class PythonBinpackDataset:
     """Pure Python fallback (slow, for testing only)."""
     
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, input_dim: int = 81920):
         self.filepath = filepath
+        self.input_dim = input_dim
         self._build_index()
     
     def _build_index(self):
@@ -188,9 +189,9 @@ class PythonBinpackDataset:
             game_result = struct.unpack("<b", f.read(1))[0]
             
             # Convert to dense
-            features = np.zeros(81920, dtype=np.float32)
+            features = np.zeros(self.input_dim, dtype=np.float32)
             for idx, w in zip(feature_indices, feature_weights):
-                if idx < 81920:
+                if idx < self.input_dim:
                     features[idx] = w
             
             return (
