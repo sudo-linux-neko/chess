@@ -319,7 +319,7 @@ def run_smoke_test(config: dict) -> int:
 
     print("\n6. Testing export...")
     exporter = create_exporter(config)
-    test_data = torch.randn(10, config["model"]["input_dim"])
+    test_data = torch.randn(10, config.get("model", {}).get("input_dim", 81920))
     nnue_path = exporter.export(pl_module.model, test_data)
     print(f"Exported: {nnue_path}")
 
@@ -529,7 +529,7 @@ def run_training(config: dict) -> int:
         test_data = test_batch["features"][:100]
     except Exception as e:
         print(f"  Warning: Could not get test data for export: {e}")
-        test_data = torch.zeros(100, config["model"]["input_dim"], dtype=torch.float32)
+        test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     # Export EMA model for better playing strength
     nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
