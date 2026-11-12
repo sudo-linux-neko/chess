@@ -422,14 +422,15 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                 if _step_from_filename(latest) < 0:
                     print(f"WARNING: Could not parse step from {latest}, skipping HF resume")
                     return None
-                local_path = Path(config["checkpoint"]["dir"]) / latest
+                ckpt_dir = config.get("checkpoint", {}).get("dir", "/kaggle/working/checkpoints")
+                local_path = Path(ckpt_dir) / latest
                 print(f"Downloading checkpoint from HF: {latest}")
                 try:
                     hf_hub_download(
                         repo_id=repo_id,
                         filename=latest,
                         repo_type="model",
-                        local_dir=config["checkpoint"]["dir"],
+                        local_dir=ckpt_dir,
                     )
                 except Exception as e:
                     print(f"HF checkpoint download failed: {e}")

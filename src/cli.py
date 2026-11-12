@@ -254,16 +254,16 @@ def run_smoke_test(config: dict) -> int:
 
     smoke_cfg = config.get("smoke_test", {})
     # Override config for smoke test
-    config["smoke_test"]["enabled"] = True
-    config["training"]["batch_size"] = smoke_cfg.get("batch_size", 512)
+    config.setdefault("smoke_test", {})["enabled"] = True
+    config.setdefault("training", {})["batch_size"] = smoke_cfg.get("batch_size", 512)
     config["training"]["max_positions"] = smoke_cfg.get("max_positions", 1000)
-    config["time_budget"]["hours"] = smoke_cfg.get("time_budget_hours", 0.05)
+    config.setdefault("time_budget", {})["hours"] = smoke_cfg.get("time_budget_hours", 0.05)
     config["time_budget"]["checkpoint_interval_min"] = smoke_cfg.get("checkpoint_interval_min", 1)
-    config["hardware"]["num_workers"] = smoke_cfg.get("num_workers", 0)
+    config.setdefault("hardware", {})["num_workers"] = smoke_cfg.get("num_workers", 0)
     config["hardware"]["compile_model"] = False
     # Ensure wdl_lambda exists
-    if "wdl_lambda" not in config["training"]:
-        config["training"]["wdl_lambda"] = 0.55
+    if "wdl_lambda" not in config.get("training", {}):
+        config.setdefault("training", {})["wdl_lambda"] = 0.55
 
     if not compile_cpp_loader():
         print("WARNING: C++ loader compilation failed")
@@ -672,13 +672,13 @@ def main():
         for key, value in smoke_cfg.items():
             if key != "enabled":
                 if key in ["batch_size", "max_positions"]:
-                    config["training"][key] = value
+                    config.setdefault("training", {})[key] = value
                 elif key in ["time_budget_hours", "checkpoint_interval_min"]:
-                    config["time_budget"][key.replace("_hours", "").replace("_min", "")] = value
+                    config.setdefault("time_budget", {})[key.replace("_hours", "").replace("_min", "")] = value
                 elif key == "num_workers":
-                    config["hardware"]["num_workers"] = value
-        config["smoke_test"]["enabled"] = True
-        config["hardware"]["compile_model"] = False
+                    config.setdefault("hardware", {})["num_workers"] = value
+        config.setdefault("smoke_test", {})["enabled"] = True
+        config.setdefault("hardware", {})["compile_model"] = False
 
     setup_environment(config)
 

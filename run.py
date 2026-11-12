@@ -36,6 +36,10 @@ from pathlib import Path
 # Add src to path
 SRC_DIR = Path(__file__).parent / "src"
 sys.path.insert(0, str(SRC_DIR))
+# Add cpp_loader dir for direct import of compiled C++ loader
+CPP_LOADER_DIR = SRC_DIR / "cpp_loader"
+if CPP_LOADER_DIR.exists():
+    sys.path.insert(0, str(CPP_LOADER_DIR))
 
 import torch
 import numpy as np
@@ -229,7 +233,7 @@ def run_full_training(config, is_kaggle):
 
     # 2. Setup data with streaming (starts background download, doesn't block)
     print("\n[2/8] Preparing training data (streaming mode)...")
-    data_dir = Path(config["data"]["data_dir"])
+    data_dir = Path(config.get("data", {}).get("data_dir", "/kaggle/working/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
 
     stream_cfg = config.get("data", {}).get("streaming", {})

@@ -610,9 +610,18 @@ class TimeLimitCallback(Callback):
     def __init__(self, max_hours: float = 9.5):
         self.max_seconds = max_hours * 3600
         self.start_time = time.time()
+        self._elapsed_offset = 0.0  # Previously elapsed time (for resume)
+
+    def on_train_start(self, trainer, pl_module):
+        """Adjust start time for previously elapsed time (resume support)."""
+        # Account for time already spent training before resume
+        training_state = getattr(pl_module, 'training_state', None)
+        if training_state is not None:
+            self._elapsed_offset = float(getattr(training_state, 'time_elapsed', 0.0))
+        self.start_time = time.time()  # Reset to now; elapsed will include offset
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        elapsed = time.time() - self.start_time
+        elapsed = time.time() - self.start_time + self._elapsed_offset
         if elapsed >= self.max_seconds:
             print(f"Time budget ({self.max_seconds/3600:.1f}h) exceeded. Stopping...")
             trainer.should_stop = True
