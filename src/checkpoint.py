@@ -245,14 +245,20 @@ class CheckpointManager:
 
     def _rotate_checkpoints(self, is_best: bool = False):
         """Rotate checkpoints: keep last N + best N."""
-        # Get all checkpoint files
+        # Get all checkpoint files with robust step parsing
+        def _step_from_path(p: Path) -> int:
+            try:
+                return int(p.stem.split('_')[1])
+            except (IndexError, ValueError):
+                return -1
+        
         checkpoints = sorted(
-            self.checkpoint_dir.glob("step_*.pt"),
-            key=lambda p: int(p.stem.split('_')[1]) if '_' in p.stem else 0
+            [p for p in self.checkpoint_dir.glob("step_*.pt") if _step_from_path(p) >= 0],
+            key=_step_from_path,
         )
         best_checkpoints = sorted(
             self.checkpoint_dir.glob("best*.pt"),
-            key=lambda p: self._get_val_loss(p)
+            key=lambda p: self._get_val_loss(p),
         )
 
         # Remove old step checkpoints
@@ -350,11 +356,19 @@ class CheckpointManager:
                 setattr(training_state, key, value)
 
     def find_latest_checkpoint(self) -> Optional[Path]:
-        """Find most recent checkpoint."""
+        """Find most recent checkpoint by step number."""
         checkpoints = list(self.checkpoint_dir.glob("step_*.pt"))
         if not checkpoints:
             return None
-        return max(checkpoints, key=lambda p: p.stat().st_mtime)
+        def _step_from_path(p: Path) -> int:
+            try:
+                return int(p.stem.split('_')[1])
+            except (IndexError, ValueError):
+                return -1
+        valid = [p for p in checkpoints if _step_from_path(p) >= 0]
+        if not valid:
+            return None
+        return max(valid, key=_step_from_path)
 
     def find_best_checkpoint(self) -> Optional[Path]:
         """Find best checkpoint by validation loss."""

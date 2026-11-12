@@ -192,6 +192,9 @@ class NNUELightningModule(pl.LightningModule):
         self._global_start_time = time.time()
         self._epoch_start_time = time.time()
         
+        # Resume time offset: previously elapsed time before this process started
+        self._resume_time_offset = 0.0
+        
         # Time budget
         time_cfg = config.get("time_budget", {})
         self.max_time_seconds = time_cfg.get("hours", 9.5) * 3600
@@ -389,9 +392,8 @@ class NNUELightningModule(pl.LightningModule):
         if self.trainer.global_rank != 0:
             return
         try:
-            # Update cumulative time_elapsed before saving (on_save_checkpoint
-            # isn't called because PL checkpointing is disabled)
-            self.training_state.time_elapsed = time.time() - self._global_start_time
+            # Update cumulative time_elapsed before saving
+            self.training_state.time_elapsed = time.time() - self._global_start_time + self._resume_time_offset
             
             ckpt_path = self.checkpoint_manager.save_checkpoint(
                 model=self.model,
@@ -421,7 +423,7 @@ class NNUELightningModule(pl.LightningModule):
 
     def _check_time_budget(self) -> bool:
         """Check if time budget exceeded."""
-        elapsed = time.time() - self._global_start_time + self.training_state.time_elapsed
+        elapsed = time.time() - self._global_start_time + self._resume_time_offset
         return elapsed >= self.max_time_seconds
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
@@ -592,6 +594,8 @@ class NNUELightningModule(pl.LightningModule):
             self.training_state.lr_history = ts.get("lr_history", [])
             self.training_state.lambda_history = ts.get("lambda_history", [])
             self.training_state.time_elapsed = ts.get("time_elapsed", 0.0)
+            # Track previously elapsed time so time budget is correct across resumes
+            self._resume_time_offset = ts.get("time_elapsed", 0.0)
         
         # Load EMA state
         if "ema_state_dict" in checkpoint and self.ema_model is not None:

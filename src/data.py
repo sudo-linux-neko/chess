@@ -268,7 +268,8 @@ class StreamingBinpackDataset(IterableDataset):
 
     def _skip_position(self, f):
         num_features = struct.unpack("<H", f.read(2))[0]
-        f.seek(num_features * 6 + 13, 1)
+        # Skip: features(num_features*2) + weights(num_features*4) + wdl(12) + eval(4) + game_result(1)
+        f.seek(num_features * 6 + 17, 1)
 
     def _get_position_offset(self, filepath: Path, idx: int) -> int:
         """Get exact byte offset for a position by building index on first call."""
@@ -292,7 +293,7 @@ class StreamingBinpackDataset(IterableDataset):
                         break
                     num_features = struct.unpack("<H", num_features_bytes)[0]
                     # Skip position data: features (2 bytes each) + weights (4 bytes each) + wdl (12) + eval (4) + game_result (1)
-                    pos += 2 + num_features * 6 + 13
+                    pos += 2 + num_features * 6 + 17  # num_features + features + weights + wdl + eval + game_result
                     f.seek(pos)
             
             self._position_offsets_cache[filepath] = offsets
@@ -673,8 +674,9 @@ class StreamingDataManager:
         
         # Find source for this file
         source = None
+        import fnmatch
         for s in self.sources:
-            if filepath.name in str(s.pattern) or filepath.match(s.pattern):
+            if fnmatch.fnmatch(filepath.name, s.pattern) or filepath.match(s.pattern):
                 source = s
                 break
         
@@ -1318,7 +1320,7 @@ struct BinpackDataset::Impl {
         for (size_t i = 0; i < num_positions; ++i) {
             position_offsets.push_back(pos);
             uint16_t num_features; file.read(reinterpret_cast<char*>(&num_features), 2);
-            pos = file.tellg(); pos += num_features * 6 + 13; file.seekg(pos);
+            pos = file.tellg(); pos += num_features * 6 + 17; file.seekg(pos);
         }
     }
     Position read_position(size_t idx) {

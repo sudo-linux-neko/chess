@@ -276,6 +276,7 @@ def run_smoke_test(config: dict) -> int:
     print("\n3. Initializing training components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
+    streaming_manager = None  # Not used in smoke test
 
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
@@ -440,7 +441,7 @@ def run_training(config: dict) -> int:
     shutdown_requested = False
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
-        print("\nReceived interrupt signal, saving checkpoint...")
+        print("\nReceived interrupt signal, will stop after current batch...")
         shutdown_requested = True
         trainer.should_stop = True
     
