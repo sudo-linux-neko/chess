@@ -410,6 +410,31 @@ def run_full_training(config, is_kaggle):
         print(f"\n  Training error: {e}")
         import traceback
         traceback.print_exc()
+        # Try to save emergency checkpoint on crash
+        try:
+            if pl_module and checkpoint_manager:
+                print("  Saving emergency checkpoint...")
+                try:
+                    opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+                except Exception:
+                    opt = None
+                try:
+                    sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+                except Exception:
+                    sched = None
+                checkpoint_manager.save_checkpoint(
+                    model=pl_module.model,
+                    optimizer=opt,
+                    scheduler=sched,
+                    scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
+                    training_state=pl_module.training_state,
+                    config=config,
+                    ema_model=pl_module.ema_model,
+                    is_best=False,
+                )
+                print("  Emergency checkpoint saved.")
+        except Exception as e2:
+            print(f"  Emergency checkpoint failed: {e2}")
         if hf_uploader:
             try:
                 hf_uploader.shutdown(wait=True)
