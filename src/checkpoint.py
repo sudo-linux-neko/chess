@@ -150,15 +150,18 @@ class CheckpointManager:
                 file_sha256 = self._compute_sha256(final_path)
 
                 # Create metadata
+                _tl = getattr(training_state, 'train_losses', None)
+                _vl = getattr(training_state, 'val_losses', None)
+                _lh = getattr(training_state, 'lambda_history', None)
                 metadata = CheckpointMetadata(
                     step=step,
                     epoch=getattr(training_state, 'epoch', 0),
                     samples_seen=getattr(training_state, 'samples_seen', 0),
-                    train_loss=getattr(training_state, 'train_losses', [0])[-1] if getattr(training_state, 'train_losses', None) else 0,
-                    val_loss=getattr(training_state, 'val_losses', [0])[-1] if getattr(training_state, 'val_losses', None) else 0,
+                    train_loss=_tl[-1] if _tl else 0,
+                    val_loss=_vl[-1] if _vl else 0,
                     best_val_loss=getattr(training_state, 'best_val_loss', float('inf')),
                     learning_rate=optimizer.param_groups[0]['lr'] if optimizer else 0,
-                    lambda_val=getattr(training_state, 'lambda_history', [0])[-1] if getattr(training_state, 'lambda_history', None) else 0,
+                    lambda_val=_lh[-1] if _lh else 0,
                     time_elapsed=getattr(training_state, 'time_elapsed', 0),
                     timestamp=timestamp,
                     git_sha=self._get_git_sha(),
@@ -401,9 +404,14 @@ class CheckpointManager:
                 with open(meta_path) as f:
                     result.append(json.load(f))
             else:
+                # Robust step parsing with try/except for malformed filenames
+                try:
+                    step = int(ckpt.stem.split('_')[1]) if '_' in ckpt.stem else 0
+                except (IndexError, ValueError):
+                    step = 0
                 result.append({
                     "path": str(ckpt),
-                    "step": int(ckpt.stem.split('_')[1]) if '_' in ckpt.stem else 0,
+                    "step": step,
                     "size_mb": ckpt.stat().st_size / 1024**2,
                 })
         return result

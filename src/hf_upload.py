@@ -279,6 +279,10 @@ class HFUploader:
 
     def _upload_file(self, api, task: UploadTask):
         """Upload a single file to HF Hub."""
+        # Check file still exists (may have been deleted by cleanup between queue and upload)
+        if not task.local_path.exists():
+            raise FileNotFoundError(f"File no longer exists: {task.local_path}")
+
         # Bandwidth limiting
         if self.bandwidth_limit_mbps > 0:
             self._rate_limit_upload(task.file_size)

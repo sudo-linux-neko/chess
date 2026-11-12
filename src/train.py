@@ -291,7 +291,7 @@ class NNUELightningModule(pl.LightningModule):
             print(f"WARNING: Non-finite loss detected at step {self.training_state.step}, skipping step")
             # Return clean zero loss disconnected from graph - NaN * 0 = NaN, so
             # we must NOT multiply by loss. A fresh zero tensor prevents weight corruption.
-            return torch.tensor(0.0, device=loss.device, requires_grad=True)
+            return torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
         # Log losses (only on accumulation boundaries to reduce noise)
         # Use trainer.global_step instead of batch_idx % accum_steps because
@@ -529,7 +529,10 @@ class NNUELightningModule(pl.LightningModule):
         # Cast config values to float (YAML can load scientific notation as string)
         lr = float(train_cfg.get("learning_rate", 0.0008))
         weight_decay = float(train_cfg.get("weight_decay", 4e-5))
-        betas = tuple(float(b) for b in train_cfg.get("betas", (0.9, 0.999)))
+        betas_raw = train_cfg.get("betas", (0.9, 0.999))
+        if not isinstance(betas_raw, (list, tuple)):
+            betas_raw = (float(betas_raw), 0.999)
+        betas = tuple(float(b) for b in betas_raw)
         eps = float(train_cfg.get("eps", 1e-8))
         
         # AdamW with factorized weight decay

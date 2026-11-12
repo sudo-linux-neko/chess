@@ -1503,6 +1503,13 @@ def create_dataloader(
                 dataset.files = active_files
                 print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
         else:
+            # Non-streaming: check for existing data files first
+            binpack_files = list(Path(data_cfg.get("data_dir", "/kaggle/working/data")).glob("*.binpack"))
+            if not binpack_files:
+                print("  ERROR: No .binpack files found - cannot start training in non-streaming mode")
+                print("  Please download data first with --download-data or enable streaming")
+                raise RuntimeError("No .binpack files found for non-streaming training")
+            print(f"  Found {len(binpack_files)} data files")
             dataset = StreamingBinpackDataset(
                 data_dir=data_cfg.get("data_dir", "/kaggle/working/data"),
                 sources=sources,
@@ -1531,7 +1538,7 @@ def create_dataloader(
         pin_memory=hw_cfg.get("pin_memory", True),
         drop_last=is_train and data_cfg.get("drop_last_batch", True),
         worker_init_fn=_worker_init_fn,
-        multiprocessing_context=mp.get_context('forkserver') if hasattr(mp, 'get_context') else None,
+        multiprocessing_context=mp.get_context('spawn') if hasattr(mp, 'get_context') else None,
     )
 
 
