@@ -570,7 +570,8 @@ def run_training(config: dict) -> int:
 
     if nnue_path:
         hf_uploader.queue_export(nnue_path)
-    hf_uploader.shutdown(wait=True)
+    if hf_uploader:
+        hf_uploader.shutdown(wait=True)
 
     # Shutdown streaming manager
     if streaming_manager:
@@ -611,7 +612,7 @@ def run_export_only(config: dict) -> int:
         print(f"  Warning: Could not get test data: {e}")
         test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
-    nnue_path = exporter.export(model, test_data, use_ema=True)
+    nnue_path = exporter.export(model, test_data, use_ema=False)
 
     if config.get("export", {}).get("verify", True):
         result = exporter.verify_export(model, nnue_path, test_data)
@@ -643,7 +644,15 @@ def run_verify_export(config: dict) -> int:
         print("No exported .nnue file found")
         return 1
 
-    nnue_path = max(nnue_files, key=lambda f: f.stat().st_mtime)
+    # Sort by step number from filename (nn-<hash>.nnue doesn't have step,
+    # so use mtime as secondary, but prefer by size as proxy for completeness)
+    def _nnue_sort_key(f: Path):
+        try:
+            # Prefer larger files (more complete), then mtime
+            return (f.stat().st_size, f.stat().st_mtime)
+        except Exception:
+            return (0, 0)
+    nnue_path = max(nnue_files, key=_nnue_sort_key)
     print(f"Verifying: {nnue_path}")
 
     test_data = None

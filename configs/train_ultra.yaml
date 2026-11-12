@@ -215,12 +215,16 @@ smoke_test:
 # Advanced features
 advanced:
   # Data augmentation (board symmetries)
-  # NOTE: color_flip disabled - correct HalfKAv2_hm remapping requires
-  # feature index mapping not yet implemented. x[::-1] would corrupt data.
+  # NOTE: flip_horizontal and flip_vertical DISABLED - correct HalfKAv2_hm
+  # remapping requires feature index remapping WITHIN each bucket, not just
+  # bucket reordering. Without proper per-bucket feature remapping, these
+  # augmentations produce incorrect positions (e.g., a piece at file f stays
+  # at file f after flip instead of mapping to 7-f), corrupting training data.
+  # color_flip also disabled - requires complex white/black piece remapping.
   augmentations:
-    flip_horizontal: true
-    flip_vertical: true
-    rotate_180: true
+    flip_horizontal: false
+    flip_vertical: false
+    rotate_180: false
     color_flip: false
 
   # Overfitting detection (warns if model is memorizing instead of learning)

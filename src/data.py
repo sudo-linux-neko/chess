@@ -111,6 +111,9 @@ class StreamingBinpackDataset(IterableDataset):
         self._position_lock = threading.Lock()
         self._file_loaders: Dict[int, Any] = {}
         self._max_cached_loaders = 8  # Limit open file handles
+        # Track whether resume state has been consumed (prevents epoch 2+
+        # from incorrectly using end-of-epoch-1 position as start position)
+        self._resume_consumed = False
 
     def _discover_files(self) -> List[Path]:
         """Find all .binpack files in data_dir, sorted by priority source."""
@@ -140,18 +143,27 @@ class StreamingBinpackDataset(IterableDataset):
 
         # Handle resume - distribute remaining files across ALL workers
         # (not just worker 0, which would leave other GPUs idle after resume)
+        # Resume state is consumed once: after first epoch, start fresh from
+        # beginning of all files (normal multi-epoch training)
         if self.current_file_idx > 0 or self.current_position > 0:
-            remaining_files = self.files[self.current_file_idx:]
-            if len(remaining_files) > 0:
-                rem_files_per_worker = max(1, len(remaining_files) // num_workers)
-                rem_start_idx = worker_id * rem_files_per_worker
-                rem_end_idx = rem_start_idx + rem_files_per_worker if worker_id < num_workers - 1 else len(remaining_files)
-                worker_files = remaining_files[rem_start_idx:rem_end_idx]
-                # Adjust start_idx so global_file_idx maps correctly to self.files indices
-                start_idx = self.current_file_idx + rem_start_idx
+            if not self._resume_consumed:
+                remaining_files = self.files[self.current_file_idx:]
+                if len(remaining_files) > 0:
+                    rem_files_per_worker = max(1, len(remaining_files) // num_workers)
+                    rem_start_idx = worker_id * rem_files_per_worker
+                    rem_end_idx = rem_start_idx + rem_files_per_worker if worker_id < num_workers - 1 else len(remaining_files)
+                    worker_files = remaining_files[rem_start_idx:rem_end_idx]
+                    # Adjust start_idx so global_file_idx maps correctly to self.files indices
+                    start_idx = self.current_file_idx + rem_start_idx
+                else:
+                    worker_files = []
+                    start_idx = 0
+                # Mark resume as consumed so subsequent epochs start fresh
+                self._resume_consumed = True
             else:
-                worker_files = []
-                start_idx = 0
+                # Resume already consumed - start fresh from beginning
+                self.current_file_idx = 0
+                self.current_position = 0
 
         for file_idx, filepath in enumerate(worker_files):
             global_file_idx = start_idx + file_idx
