@@ -706,7 +706,13 @@ class OverfittingCallback(Callback):
             self.best_val_loss = val_loss
             self.worse_count = 0
             self.checks_since_improvement = 0
-            self.best_model_state = {k: v.clone() for k, v in pl_module.model.state_dict().items()}
+            # Strip _orig_mod. prefix from compiled model state_dict keys
+            # so EMA model (not compiled) can also load this state
+            raw_state = {}
+            for k, v in pl_module.model.state_dict().items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                raw_state[clean_key] = v.clone()
+            self.best_model_state = raw_state
         else:
             self.worse_count += 1
             self.checks_since_improvement += 1

@@ -563,7 +563,8 @@ def run_full_training(config, is_kaggle):
 
         if hf_uploader and hf_token:
             try:
-                hf_uploader.queue_export(nnue_path)
+                if nnue_path:
+                    hf_uploader.queue_export(nnue_path)
             except Exception as e:
                 print(f"  Export upload failed: {e}")
 

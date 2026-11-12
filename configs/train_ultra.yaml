@@ -7,8 +7,8 @@
 
 hardware:
   gpus: 2
-  num_workers: 24                    # Increased for max CPU parallelism
-  prefetch_factor: 16                # Increased to keep GPUs fed
+  num_workers: 2                    # Limited to prevent OOM with 32768 batch size (each batch ~10GB)
+  prefetch_factor: 1                # Only 1 batch prefetched per worker
   persistent_workers: true
   pin_memory: true
   compile_model: true

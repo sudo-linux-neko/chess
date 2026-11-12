@@ -546,7 +546,8 @@ def run_training(config: dict) -> int:
         except Exception as e:
             print(f"Verification error: {e}")
 
-    hf_uploader.queue_export(nnue_path)
+    if nnue_path:
+        hf_uploader.queue_export(nnue_path)
     hf_uploader.shutdown(wait=True)
 
     # Shutdown streaming manager
