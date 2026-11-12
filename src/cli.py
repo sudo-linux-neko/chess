@@ -132,10 +132,10 @@ def build_rust(config: dict) -> int:
 def download_data(config: dict) -> int:
     """Download training data from high-quality sources."""
     print("Downloading training data from Stockfish sources...")
-    data_dir = Path(config["data"]["data_dir"])
+    data_dir = Path(config.get("data", {}).get("data_dir", "/kaggle/working/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    sources = [DataSource(**s) for s in config["data"].get("sources", [])]
+    sources = [DataSource(**s) for s in config.get("data", {}).get("sources", [])]
     files = download_training_data(data_dir, config, max_files=20)
     
     print(f"Downloaded {len(files)} files")
@@ -157,7 +157,7 @@ def run_benchmark(config: dict) -> int:
     if not compile_cpp_loader():
         print("WARNING: C++ loader compilation failed, using Python fallback")
 
-    data_dir = Path(config["data"]["data_dir"])
+    data_dir = Path(config.get("data", {}).get("data_dir", "/kaggle/working/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     binpack_files = list(data_dir.glob("*.binpack"))
     if not binpack_files:
@@ -269,7 +269,7 @@ def run_smoke_test(config: dict) -> int:
         print("WARNING: C++ loader compilation failed")
 
     print("\n2. Creating dummy data...")
-    data_dir = Path(config["data"]["data_dir"])
+    data_dir = Path(config.get("data", {}).get("data_dir", "/kaggle/working/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     _create_dummy_binpack(data_dir / "smoke_test.binpack", 1000)
 
@@ -342,24 +342,26 @@ def run_training(config: dict) -> int:
     print("ULTRA-OPTIMIZED NNUE TRAINER - Stockfish on 2x T4")
     print("=" * 60)
     print(f"Config: {config.get('config_path', 'configs/train_ultra.yaml')}")
-    print(f"Time budget: {config['time_budget']['hours']} hours")
-    print(f"GPUs: {config['hardware']['gpus']}")
-    print(f"Batch size: {config['training']['batch_size']} (global)")
-    print(f"Micro batch: {config['training']['micro_batch_size']} (accum x{config['advanced']['gradient_accumulation']})")
-    print(f"LR: {config['training']['learning_rate']} (One-Cycle)")
+    print(f"Time budget: {config.get('time_budget', {}).get('hours', 9.5)} hours")
+    print(f"GPUs: {config.get('hardware', {}).get('gpus', 2)}")
+    print(f"Batch size: {config.get('training', {}).get('batch_size', 'N/A')} (global)")
+    print(f"Micro batch: {config.get('training', {}).get('micro_batch_size', 'N/A')} (accum x{config.get('advanced', {}).get('gradient_accumulation', 'N/A')})")
+    print(f"LR: {config.get('training', {}).get('learning_rate', 'N/A')} (One-Cycle)")
     print(f"Architecture: FT(256 shared) -> L1(256) -> L2(32) -> Out(1)")
-    print(f"Loss: WDL({config['training']['wdl_lambda']}) + Quantile Eval")
+    print(f"Loss: WDL({config.get('training', {}).get('wdl_lambda', 'N/A')}) + Quantile Eval")
     print(f"LR Schedule: One-Cycle + Lambda Jitter")
     print(f"Data: High-quality Stockfish (3500+ Elo, depth 15+)")
     print(f"EMA: Enabled for evaluation")
 
-    print("\n1. Compiling C++ binpack loader...")
-    if not compile_cpp_loader():
-        print("ERROR: C++ loader compilation failed")
-        return 1
+    print("\n1. Compiling C++ binpack loader (non-fatal)...")
+    cpp_ok = compile_cpp_loader()
+    if cpp_ok:
+        print("  C++ loader ready (fast path).")
+    else:
+        print("  WARNING: C++ compilation failed - using Python fallback (works, slightly slower).")
 
     print("\n2. Preparing training data...")
-    data_dir = Path(config["data"]["data_dir"])
+    data_dir = Path(config.get("data", {}).get("data_dir", "/kaggle/working/data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     
     # Check if streaming is enabled
@@ -611,7 +613,7 @@ def run_verify_export(config: dict) -> int:
     model = create_model(config)
     checkpoint_manager.load_checkpoint(latest_ckpt, model=model)
 
-    export_dir = Path(config["export"]["dir"])
+    export_dir = Path(config.get("export", {}).get("dir", "/kaggle/working/export"))
     nnue_files = list(export_dir.glob("nn-*.nnue"))
     if not nnue_files:
         print("No exported .nnue file found")
@@ -624,10 +626,10 @@ def run_verify_export(config: dict) -> int:
     try:
         test_loader = create_dataloader(config, is_train=False)
         test_batch = next(iter(test_loader))
-        test_data = test_batch["features"][:config["export"]["verify_samples"]]
+        test_data = test_batch["features"][:config.get("export", {}).get("verify_samples", 20000)]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")
-        test_data = torch.zeros(config["export"]["verify_samples"], config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
+        test_data = torch.zeros(config.get("export", {}).get("verify_samples", 20000), config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     exporter = create_exporter(config)
     result = exporter.verify_export(model, nnue_path, test_data)

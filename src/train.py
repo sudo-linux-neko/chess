@@ -389,11 +389,15 @@ class NNUELightningModule(pl.LightningModule):
         if self.trainer.global_rank != 0:
             return
         try:
+            # Update cumulative time_elapsed before saving (on_save_checkpoint
+            # isn't called because PL checkpointing is disabled)
+            self.training_state.time_elapsed = time.time() - self._global_start_time
+            
             ckpt_path = self.checkpoint_manager.save_checkpoint(
                 model=self.model,
                 optimizer=self.optimizers()[0] if self.optimizers() else None,
                 scheduler=self.lr_schedulers()[0] if self.lr_schedulers() else None,
-                scaler=self.trainer.scaler if hasattr(self.trainer, 'scaler') else None,
+                scaler=self.trainer.scaler if hasattr(self.trainer, 'scaler') and self.trainer.scaler is not None else None,
                 training_state=self.training_state,
                 config=self.config,
                 ema_model=self.ema_model,  # Pass EMA model for checkpointing

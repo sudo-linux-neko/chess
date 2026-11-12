@@ -289,7 +289,10 @@ class NNUEExporter:
         for param in model.parameters():
             hasher.update(param.data.cpu().numpy().tobytes())
         # Include architecture config for uniqueness
-        arch_str = f"{model.config.get('model', {})}"
+        try:
+            arch_str = f"{model.config.get('model', {})}"
+        except AttributeError:
+            arch_str = "unknown_arch"
         hasher.update(arch_str.encode())
         return hasher.hexdigest()
 

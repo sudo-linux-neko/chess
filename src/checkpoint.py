@@ -409,16 +409,31 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
             files = list_repo_files(repo_id=repo_id, repo_type="model")
             ckpt_files = [f for f in files if f.endswith(".pt") and "step_" in f]
             if ckpt_files:
-                # Get latest by step number
-                latest = max(ckpt_files, key=lambda f: int(f.split('_')[1].split('.')[0]))
+                # Get latest by step number - robust parsing
+                def _step_from_filename(fname: str) -> int:
+                    try:
+                        # Expected: step_NNNNNNNN.pt
+                        base = fname.split('_')[1].split('.')[0]
+                        return int(base)
+                    except (IndexError, ValueError):
+                        return -1
+                
+                latest = max(ckpt_files, key=_step_from_filename)
+                if _step_from_filename(latest) < 0:
+                    print(f"WARNING: Could not parse step from {latest}, skipping HF resume")
+                    return None
                 local_path = Path(config["checkpoint"]["dir"]) / latest
                 print(f"Downloading checkpoint from HF: {latest}")
-                hf_hub_download(
-                    repo_id=repo_id,
-                    filename=latest,
-                    repo_type="model",
-                    local_dir=config["checkpoint"]["dir"],
-                )
+                try:
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=latest,
+                        repo_type="model",
+                        local_dir=config["checkpoint"]["dir"],
+                    )
+                except Exception as e:
+                    print(f"HF checkpoint download failed: {e}")
+                    return None
                 return local_path
     except Exception as e:
         print(f"HF checkpoint download failed: {e}")

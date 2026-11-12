@@ -640,9 +640,10 @@ class StreamingDataManager:
             return
         
         # Sort by priority, download just 1 file to start
+        import fnmatch
         priority_files = sorted(
             [f for f in self._all_files if f not in self._downloaded_files],
-            key=lambda f: next((s.priority for s in self.sources if f.name in str(s.pattern)), 999)
+            key=lambda f: next((s.priority for s in self.sources if fnmatch.fnmatch(f.name, s.pattern)), 999)
         )
         
         if priority_files:
@@ -898,7 +899,8 @@ class StreamingDataManager:
                 return True  # No files at all
             
             # Check if we have enough buffer
-            if current_gb := self._get_active_size_gb() < self._min_prefetch_gb:
+            current_gb = self._get_active_size_gb()
+            if current_gb < self._min_prefetch_gb:
                 return True
             
             # Check consumption rate - if data is being consumed, prefetch
@@ -1026,7 +1028,8 @@ def download_training_data(
             break
 
     # Sort by priority using DataSource objects
-    downloaded_files.sort(key=lambda f: next((s.priority for s in data_sources if f.name in str(s.pattern)), 999))
+    import fnmatch
+    downloaded_files.sort(key=lambda f: next((s.priority for s in data_sources if fnmatch.fnmatch(f.name, s.pattern)), 999))
     return downloaded_files
 
 
