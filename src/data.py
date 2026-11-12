@@ -1160,8 +1160,21 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                         local_dir=str(data_dir),
                         force_download=False,
                     )
-                    downloaded.append(Path(local_path))
-                    file_size = Path(local_path).stat().st_size
+                    actual_path = Path(local_path)
+                    
+                    # Create symlink at data_dir/filename for consistent path tracking
+                    # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
+                    # but callers use data_dir.glob("*.binpack") which expects data_dir/<filename>
+                    link_path = data_dir / filename
+                    try:
+                        if not link_path.exists():
+                            link_path.symlink_to(actual_path)
+                    except Exception:
+                        # Symlinks not supported, use actual path
+                        link_path = actual_path
+                    
+                    downloaded.append(link_path)
+                    file_size = actual_path.stat().st_size
                     total_size += file_size
                     print(f"  Downloaded: {filename} ({file_size / 1024**3:.2f}GB)")
                 except Exception as e:

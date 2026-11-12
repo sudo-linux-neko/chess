@@ -565,7 +565,8 @@ def run_training(config: dict) -> int:
                 print(f"  Remediation attempt: {status['attempt']}/{cb.max_remediation_attempts}")
             
             # Restore best model if we stopped due to overfitting
-            if status['status'] in ('stopped_overfitting', 'overfitting_stopped', 'overfitting') and not status['learning']:
+            # Only restore for terminal stopped states, not for 'overfitting' (detected but may remediate)
+            if status['status'] in ('stopped_overfitting', 'overfitting_stopped') and not status['learning']:
                 print(f"  🔄 Restoring best model from step with val_loss={cb.best_val_loss:.4f}...")
                 cb.restore_best_model(pl_module)
             break

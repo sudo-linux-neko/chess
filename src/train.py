@@ -532,8 +532,8 @@ class NNUELightningModule(pl.LightningModule):
                 fused=True,
                 **optimizer_kwargs,
             )
-        except TypeError:
-            # fused not supported (CPU or older PyTorch)
+        except (TypeError, RuntimeError, ValueError):
+            # fused not supported (CPU or older PyTorch/CUDA)
             optimizer = torch.optim.AdamW(
                 self.model.parameters(),
                 **optimizer_kwargs,
