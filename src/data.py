@@ -178,7 +178,7 @@ class StreamingBinpackDataset(IterableDataset):
         dataset = self._file_loaders[file_idx]
         num_positions = len(dataset)
 
-        start_pos = self.current_position if file_idx == self.start_file else 0
+        start_pos = self.current_position if file_idx == self.current_file_idx else 0
 
         # Curriculum: skip early game positions based on ply
         indices = list(range(start_pos, num_positions))
@@ -230,7 +230,7 @@ class StreamingBinpackDataset(IterableDataset):
                 version = struct.unpack("<I", f.read(4))[0]
                 num_positions = struct.unpack("<Q", f.read(8))[0]
 
-                start_pos = self.current_position if file_idx == self.start_file else 0
+                start_pos = self.current_position if file_idx == self.current_file_idx else 0
                 
                 for _ in range(start_pos):
                     self._skip_position(f)

@@ -381,7 +381,12 @@ def run_training(config: dict) -> int:
             keep_recent=stream_cfg.get("keep_recent", 2),
             auto_cleanup=stream_cfg.get("auto_cleanup", True),
         )
-        streaming_manager = StreamingDataManager(data_dir, config, streaming_config)
+        try:
+            streaming_manager = StreamingDataManager(data_dir, config, streaming_config)
+        except Exception as e:
+            print(f"  WARNING: Streaming setup failed: {e} - falling back to non-streaming mode")
+            streaming_manager = None
+            use_streaming = False
     else:
         binpack_files = list(data_dir.glob("*.binpack"))
         if not binpack_files:
@@ -390,6 +395,9 @@ def run_training(config: dict) -> int:
             binpack_files = list(data_dir.glob("*.binpack"))
         
         print(f"Found {len(binpack_files)} data files")
+        if not binpack_files:
+            print("  ERROR: No data files available - cannot start training")
+            return 1
         total_gb = sum(f.stat().st_size for f in binpack_files) / 1024**3
         print(f"Total data: {total_gb:.2f} GB")
 
@@ -428,7 +436,12 @@ def run_training(config: dict) -> int:
         )
         # Sync EMA model with loaded weights
         if pl_module.ema_model is not None:
-            pl_module.ema_model.load_state_dict(pl_module.model.state_dict())
+            # Strip _orig_mod. prefix from compiled model state_dict
+            raw_state = {}
+            for k, v in pl_module.model.state_dict().items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                raw_state[clean_key] = v.clone()
+            pl_module.ema_model.load_state_dict(raw_state)
 
     # Create trainer with streaming manager
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)
@@ -535,12 +548,18 @@ def run_training(config: dict) -> int:
         test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     # Export EMA model for better playing strength
-    nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
+    use_ema_export = pl_module.ema_model is not None
+    nnue_path = exporter.export(
+        pl_module.ema_model if use_ema_export else pl_module.model,
+        test_data, use_ema=use_ema_export
+    )
 
     if config.get("export", {}).get("verify", True):
         print("\n8. Verifying export...")
         try:
-            result = exporter.verify_export(pl_module.model, nnue_path, test_data)
+            # Verify against the same model that was exported
+            verify_model = pl_module.ema_model if use_ema_export else pl_module.model
+            result = exporter.verify_export(verify_model, nnue_path, test_data)
             if not result['verified']:
                 print("WARNING: Export verification failed!")
         except Exception as e:

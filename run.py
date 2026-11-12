@@ -345,7 +345,13 @@ def run_full_training(config, is_kaggle):
                 ema_model=pl_module.ema_model,
             )
             if pl_module.ema_model is not None:
-                pl_module.ema_model.load_state_dict(pl_module.model.state_dict())
+                # Strip _orig_mod. prefix from compiled model state_dict
+                # so EMA model (not compiled) can load this state
+                raw_state = {}
+                for k, v in pl_module.model.state_dict().items():
+                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                    raw_state[clean_key] = v.clone()
+                pl_module.ema_model.load_state_dict(raw_state)
             print(f"  Resumed at step {pl_module.training_state.step}")
         except Exception as e:
             print(f"  WARNING: Checkpoint load failed: {e} - starting fresh")
@@ -550,12 +556,19 @@ def run_full_training(config, is_kaggle):
             input_dim = config.get("model", {}).get("input_dim", 81920)
             test_data = torch.zeros(100, input_dim, dtype=torch.float32)
 
-        nnue_path = exporter.export(pl_module.model, test_data, use_ema=True)
+        # Use EMA model if available (EMA typically has better generalization)
+        use_ema_export = pl_module.ema_model is not None
+        nnue_path = exporter.export(
+            pl_module.ema_model if use_ema_export else pl_module.model,
+            test_data, use_ema=use_ema_export
+        )
 
         if config.get("export", {}).get("verify", True):
             print("  Verifying export...")
             try:
-                result = exporter.verify_export(pl_module.model, nnue_path, test_data)
+                # Verify against the same model that was exported
+                verify_model = pl_module.ema_model if use_ema_export else pl_module.model
+                result = exporter.verify_export(verify_model, nnue_path, test_data)
                 if not result.get('verified', False):
                     print("  WARNING: Export verification had issues")
             except Exception as e:

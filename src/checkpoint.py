@@ -107,6 +107,15 @@ class CheckpointManager:
                 "step": step,
             }
 
+            # Strip _orig_mod. prefix from torch.compile models for compatibility
+            # when loading into non-compiled models (and vice versa)
+            if "model" in state:
+                clean_model_state = {}
+                for k, v in state["model"].items():
+                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                    clean_model_state[clean_key] = v
+                state["model"] = clean_model_state
+
             # Optional components
             if self.save_optimizer and optimizer is not None:
                 state["optimizer"] = optimizer.state_dict()
@@ -309,8 +318,13 @@ class CheckpointManager:
         print(f"Loading checkpoint: {path}")
         checkpoint = torch.load(path, map_location='cpu')
 
-        # Load model
-        model.load_state_dict(checkpoint["model"], strict=strict)
+        # Load model - strip _orig_mod. prefix for compatibility with compiled/uncompiled models
+        model_state = checkpoint["model"]
+        clean_model_state = {}
+        for k, v in model_state.items():
+            clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+            clean_model_state[clean_key] = v
+        model.load_state_dict(clean_model_state, strict=strict)
 
         # Load optimizer
         if optimizer is not None and "optimizer" in checkpoint:
