@@ -138,12 +138,20 @@ class StreamingBinpackDataset(IterableDataset):
         end_idx = start_idx + files_per_worker if worker_id < num_workers - 1 else len(self.files)
         worker_files = self.files[start_idx:end_idx]
 
-        # Handle resume for worker 0
+        # Handle resume - distribute remaining files across ALL workers
+        # (not just worker 0, which would leave other GPUs idle after resume)
         if self.current_file_idx > 0 or self.current_position > 0:
-            if worker_id == 0:
-                worker_files = self.files[self.current_file_idx:]
+            remaining_files = self.files[self.current_file_idx:]
+            if len(remaining_files) > 0:
+                rem_files_per_worker = max(1, len(remaining_files) // num_workers)
+                rem_start_idx = worker_id * rem_files_per_worker
+                rem_end_idx = rem_start_idx + rem_files_per_worker if worker_id < num_workers - 1 else len(remaining_files)
+                worker_files = remaining_files[rem_start_idx:rem_end_idx]
+                # Adjust start_idx so global_file_idx maps correctly to self.files indices
+                start_idx = self.current_file_idx + rem_start_idx
             else:
                 worker_files = []
+                start_idx = 0
 
         for file_idx, filepath in enumerate(worker_files):
             global_file_idx = start_idx + file_idx

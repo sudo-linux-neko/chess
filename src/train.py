@@ -561,8 +561,8 @@ class NNUELightningModule(pl.LightningModule):
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         """Save custom state."""
-        # time_elapsed is tracked cumulatively; don't double-count
-        elapsed = time.time() - self._global_start_time
+        # time_elapsed is tracked cumulatively; include resume offset for consistency
+        elapsed = time.time() - self._global_start_time + self._resume_time_offset
         self.training_state.time_elapsed = elapsed
         
         checkpoint["training_state"] = {

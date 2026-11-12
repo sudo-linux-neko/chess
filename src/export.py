@@ -353,27 +353,58 @@ class NNUEExporter:
 
     def _run_rust_verification(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:
         """Use Rust SIMD-accelerated quantized inference for verification."""
-        # Load quantized parameters
+        # Load quantized parameters with bounds checking
+        file_size = nnue_path.stat().st_size
         with open(nnue_path, 'rb') as f:
             magic = f.read(4)
-            assert magic == b"NNUE"
-            version = struct.unpack("<I", f.read(4))[0]
-            assert version == 1
+            if len(magic) < 4 or magic != b"NNUE":
+                raise ValueError(f"Invalid NNUE magic: {magic}")
+            
+            version_bytes = f.read(4)
+            if len(version_bytes) < 4:
+                raise ValueError(f"Invalid NNUE file: too short (version)")
+            version = struct.unpack("<I", version_bytes)[0]
+            if version != 1:
+                raise ValueError(f"Unsupported NNUE version: {version}")
+            
             feature_hash = f.read(32)
+            if len(feature_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (feature_hash)")
             network_hash = f.read(32)
+            if len(network_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (network_hash)")
 
             layers = {}
             layer_names = ["feature_transformer", "hidden1", "hidden2", "output"]
             
             for name in layer_names:
-                in_features = struct.unpack("<I", f.read(4))[0]
-                out_features = struct.unpack("<I", f.read(4))[0]
+                in_features_bytes = f.read(4)
+                if len(in_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} in_features)")
+                in_features = struct.unpack("<I", in_features_bytes)[0]
                 
-                weight = np.frombuffer(f.read(out_features * in_features), dtype=np.int8)
+                out_features_bytes = f.read(4)
+                if len(out_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} out_features)")
+                out_features = struct.unpack("<I", out_features_bytes)[0]
+                
+                weight_size = out_features * in_features
+                weight = np.frombuffer(f.read(weight_size), dtype=np.int8)
+                if len(weight) < weight_size:
+                    raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
                 
-                bias = np.frombuffer(f.read(out_features * 4), dtype=np.int32)
-                scale = np.frombuffer(f.read(out_features * 4), dtype=np.float32)
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
+                
+                scale_size = out_features * 4
+                scale = np.frombuffer(f.read(scale_size), dtype=np.float32)
+                if len(scale) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated scale for layer {name}")
+                scale = scale.reshape(out_features)
                 
                 layers[name] = {
                     "weight": weight,
@@ -386,9 +417,6 @@ class NNUEExporter:
         # Convert to Rust format
         test_np = test_data.cpu().numpy().astype(np.float32)
         batch_size = test_np.shape[0]
-        
-        # Prepare data for Rust
-        import numpy as np
         
         # Call Rust quantized inference
         rust_nnue = self.RustQuantizedNNUE(
@@ -412,26 +440,57 @@ class NNUEExporter:
 
     def _run_exported_inference(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:
         """Pure Python quantized inference (fallback)."""
+        file_size = nnue_path.stat().st_size
         with open(nnue_path, 'rb') as f:
             magic = f.read(4)
-            assert magic == b"NNUE"
-            version = struct.unpack("<I", f.read(4))[0]
-            assert version == 1
+            if len(magic) < 4 or magic != b"NNUE":
+                raise ValueError(f"Invalid NNUE magic: {magic}")
+            
+            version_bytes = f.read(4)
+            if len(version_bytes) < 4:
+                raise ValueError(f"Invalid NNUE file: too short (version)")
+            version = struct.unpack("<I", version_bytes)[0]
+            if version != 1:
+                raise ValueError(f"Unsupported NNUE version: {version}")
+            
             feature_hash = f.read(32)
+            if len(feature_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (feature_hash)")
             network_hash = f.read(32)
+            if len(network_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (network_hash)")
 
             layers = {}
             layer_names = ["feature_transformer", "hidden1", "hidden2", "output"]
             
             for name in layer_names:
-                in_features = struct.unpack("<I", f.read(4))[0]
-                out_features = struct.unpack("<I", f.read(4))[0]
+                in_features_bytes = f.read(4)
+                if len(in_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} in_features)")
+                in_features = struct.unpack("<I", in_features_bytes)[0]
                 
-                weight = np.frombuffer(f.read(out_features * in_features), dtype=np.int8)
+                out_features_bytes = f.read(4)
+                if len(out_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} out_features)")
+                out_features = struct.unpack("<I", out_features_bytes)[0]
+                
+                weight_size = out_features * in_features
+                weight = np.frombuffer(f.read(weight_size), dtype=np.int8)
+                if len(weight) < weight_size:
+                    raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
                 
-                bias = np.frombuffer(f.read(out_features * 4), dtype=np.int32)
-                scale = np.frombuffer(f.read(out_features * 4), dtype=np.float32)
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
+                
+                scale_size = out_features * 4
+                scale = np.frombuffer(f.read(scale_size), dtype=np.float32)
+                if len(scale) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated scale for layer {name}")
+                scale = scale.reshape(out_features)
                 
                 layers[name] = QuantizedLayer(
                     weight=weight,
