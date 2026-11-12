@@ -315,7 +315,11 @@ class NNUELightningModule(pl.LightningModule):
             if ema_cfg.get("enabled", True):
                 update_every = ema_cfg.get("update_every", 1)
                 if self.training_state.step % update_every == 0:
-                    self.model.update_ema()
+                    # Access underlying model (torch.compile wraps it in _orig_mod)
+                    model_for_ema = self.model
+                    if hasattr(model_for_ema, '_orig_mod'):
+                        model_for_ema = model_for_ema._orig_mod
+                    model_for_ema.update_ema()
         
         # Update training state
         self.training_state.step += 1
@@ -395,6 +399,12 @@ class NNUELightningModule(pl.LightningModule):
         if self.trainer.global_rank != 0:
             return
         try:
+            # Sync data position from dataset before saving
+            dataset = getattr(self, 'train_dataset', None)
+            if dataset is not None:
+                self.training_state.current_file_idx = getattr(dataset, 'current_file_idx', 0)
+                self.training_state.current_position = getattr(dataset, 'current_position', 0)
+
             # Update cumulative time_elapsed before saving
             self.training_state.time_elapsed = time.time() - self._global_start_time + self._resume_time_offset
             
@@ -475,13 +485,16 @@ class NNUELightningModule(pl.LightningModule):
 
     def train_dataloader(self):
         """Return training dataloader."""
-        return create_dataloader(
+        loader = create_dataloader(
             self.config,
             streaming_manager=self.streaming_manager,
             is_train=True,
             start_file=self.training_state.current_file_idx,
             start_position=self.training_state.current_position,
         )
+        # Store dataset reference so we can read its position during checkpoint saves
+        self.train_dataset = loader.dataset
+        return loader
 
     def val_dataloader(self):
         """Return validation dataloader (uses a small subset for fast validation)."""
@@ -580,6 +593,8 @@ class NNUELightningModule(pl.LightningModule):
             "lr_history": self.training_state.lr_history,
             "lambda_history": self.training_state.lambda_history,
             "time_elapsed": self.training_state.time_elapsed,
+            "current_file_idx": self.training_state.current_file_idx,
+            "current_position": self.training_state.current_position,
         }
         
         # Save EMA state

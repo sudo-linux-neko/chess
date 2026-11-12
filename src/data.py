@@ -1376,9 +1376,9 @@ PYBIND11_MODULE(cpp_loader, m) {
         .def("__getitem__", [](const BinpackDataset& self, size_t idx) {
             auto pos = self[idx];
             return py::make_tuple(
-                py::array_t<uint16_t>(pos.features.size(), pos.features.data()),
-                py::array_t<float>(pos.weights.size(), pos.weights.data()),
-                py::array_t<float>(3, pos.wdl.data()),
+                py::array_t<uint16_t>(pos.features),
+                py::array_t<float>(pos.weights),
+                py::array_t<float>(std::vector<float>(pos.wdl.begin(), pos.wdl.end())),
                 pos.eval, pos.game_result
             );
         });

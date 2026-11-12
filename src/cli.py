@@ -276,6 +276,7 @@ def run_smoke_test(config: dict) -> int:
     print("\n3. Initializing training components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
+    hf_uploader.start()  # Start background upload thread
     streaming_manager = None  # Not used in smoke test
 
     model = create_model(config)
@@ -404,6 +405,7 @@ def run_training(config: dict) -> int:
     print("\n3. Initializing components...")
     checkpoint_manager = CheckpointManager(config)
     hf_uploader = create_uploader(config)
+    hf_uploader.start()  # Start background upload thread
 
     print("\n4. Checking for resumable checkpoint...")
     resume_ckpt = find_resumable_checkpoint(config, hf_uploader)

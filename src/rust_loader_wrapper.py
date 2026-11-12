@@ -96,7 +96,14 @@ class RustBinpackDataset:
         loader = get_rust_loader()
         if loader is None:
             raise RuntimeError("Rust loader not available")
-        self._dataset = loader.PyBinpackDataset(filepath)
+        # Try PyBinpackDataset first (Rust bindings), fall back to BinpackDataset
+        try:
+            self._dataset = loader.PyBinpackDataset(filepath)
+        except AttributeError:
+            try:
+                self._dataset = loader.BinpackDataset(filepath)
+            except AttributeError as e:
+                raise RuntimeError(f"Rust loader missing BinpackDataset/PyBinpackDataset: {e}")
     
     def __len__(self) -> int:
         return self._dataset.__len__()
@@ -166,7 +173,7 @@ class PythonBinpackDataset:
             for _ in range(self.num_positions):
                 self.position_offsets.append(pos)
                 num_features = struct.unpack("<H", f.read(2))[0]
-                pos += 2 + num_features * 6 + 13
+                pos += 2 + num_features * 6 + 17
                 f.seek(pos)
     
     def __len__(self):
@@ -213,15 +220,26 @@ def create_binpack_dataset(filepath: str, prefer_rust: bool = True):
 
 def create_streaming_dataset(
     data_dir: str,
+    config: dict,
     max_files: int = 5,
     shuffle_buffer_size: int = 5000000,
     seed: int = 42,
     prefer_rust: bool = True,
+    streaming_manager=None,
 ):
     """Factory function for streaming dataset."""
-    if prefer_rust and is_rust_available():
-        # Rust streaming dataset not yet implemented, fall back to Python
-        pass
     # Fall back to Python implementation in data.py
-    from src.data import StreamingBinpackDataset
-    return StreamingBinpackDataset(data_dir, max_files, shuffle_buffer_size, seed)
+    from src.data import StreamingBinpackDataset, DataSource
+    
+    data_cfg = config.get("data", {})
+    sources = [DataSource(**s) for s in data_cfg.get("sources", [])]
+    
+    return StreamingBinpackDataset(
+        data_dir=data_dir,
+        sources=sources,
+        max_files=max_files,
+        shuffle_buffer_size=shuffle_buffer_size,
+        seed=seed,
+        streaming_manager=streaming_manager,
+        config=config,
+    )
