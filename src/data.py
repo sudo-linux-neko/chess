@@ -733,11 +733,28 @@ class StreamingDataManager:
                 force_download=False,
             )
             
-            with self._lock:
-                self._downloaded_files.add(Path(local_path))
-                self._active_files.append(Path(local_path))
+            actual_path = Path(local_path)
             
-            size_gb = Path(local_path).stat().st_size / 1024**3
+            # Create symlink at data_dir/filename for consistent path tracking
+            # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
+            # but _discover_all_files uses data_dir/<filename>, so we symlink
+            link_path = self.data_dir / filepath.name
+            try:
+                if not link_path.exists():
+                    link_path.symlink_to(actual_path)
+            except Exception:
+                # Symlinks not supported, use actual path
+                link_path = actual_path
+            
+            with self._lock:
+                self._downloaded_files.add(link_path)
+                self._active_files.append(link_path)
+                # Track actual path for cleanup
+                if not hasattr(self, '_actual_paths'):
+                    self._actual_paths = {}
+                self._actual_paths[str(link_path)] = actual_path
+            
+            size_gb = actual_path.stat().st_size / 1024**3
             print(f"Downloaded: {filepath.name} ({size_gb:.2f}GB)")
             return True
             
@@ -799,7 +816,16 @@ class StreamingDataManager:
             for f in deletable:
                 try:
                     size = f.stat().st_size
-                    f.unlink()
+                    # Remove symlink
+                    f.unlink(missing_ok=True)
+                    # Also remove actual file if tracked
+                    actual = self._actual_paths.get(str(f))
+                    if actual is not None:
+                        try:
+                            actual.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        del self._actual_paths[str(f)]
                     self._active_files.remove(f)
                     freed += size
                     print(f"  Deleted: {f.name} ({size/1024**3:.2f}GB)")

@@ -451,18 +451,26 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                     print(f"WARNING: Could not parse step from {latest}, skipping HF resume")
                     return None
                 ckpt_dir = config.get("checkpoint", {}).get("dir", "/kaggle/working/checkpoints")
-                local_path = Path(ckpt_dir) / latest
                 print(f"Downloading checkpoint from HF: {latest}")
                 try:
-                    hf_hub_download(
+                    # hf_hub_download with local_dir stores at local_dir/<repo_id>/<filename>
+                    # Use the return value to get the actual local path
+                    downloaded_path = hf_hub_download(
                         repo_id=repo_id,
                         filename=latest,
                         repo_type="model",
                         local_dir=ckpt_dir,
                     )
+                    local_path = Path(downloaded_path)
                 except Exception as e:
                     print(f"HF checkpoint download failed: {e}")
                     return None
+                if not local_path.exists():
+                    # Fallback: try constructing path manually
+                    local_path = Path(ckpt_dir) / latest
+                    if not local_path.exists():
+                        print(f"Downloaded checkpoint not found at {local_path}")
+                        return None
                 return local_path
     except Exception as e:
         print(f"HF checkpoint download failed: {e}")
