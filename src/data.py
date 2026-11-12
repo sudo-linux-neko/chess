@@ -1397,6 +1397,8 @@ def create_dataloader(
     dataset: Optional[StreamingBinpackDataset] = None,
     streaming_manager: Optional[StreamingDataManager] = None,
     is_train: bool = True,
+    start_file: int = 0,
+    start_position: int = 0,
 ) -> DataLoader:
     hw_cfg = config.get("hardware", {})
     data_cfg = config.get("data", {})
@@ -1433,6 +1435,8 @@ def create_dataloader(
                         max_files=min(len(binpack_files), data_cfg.get("num_files_simultaneous", 6)),
                         shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
                         seed=config.get("seed", 42),
+                        start_file=start_file,
+                        start_position=start_position,
                         drop_last_batch=data_cfg.get("drop_last_batch", True),
                         curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                         augmentations=adv_cfg.get("augmentations", {}),
@@ -1448,6 +1452,8 @@ def create_dataloader(
                     max_files=len(active_files),
                     shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
                     seed=config.get("seed", 42),
+                    start_file=start_file,
+                    start_position=start_position,
                     drop_last_batch=data_cfg.get("drop_last_batch", True),
                     curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                     augmentations=adv_cfg.get("augmentations", {}),
@@ -1464,6 +1470,8 @@ def create_dataloader(
                 max_files=data_cfg.get("num_files_simultaneous", 6),
                 shuffle_buffer_size=data_cfg.get("shuffle_buffer_mb", 1024) * 10000,
                 seed=config.get("seed", 42),
+                start_file=start_file,
+                start_position=start_position,
                 drop_last_batch=data_cfg.get("drop_last_batch", True),
                 curriculum_enabled=train_cfg.get("curriculum", {}).get("enabled", True),
                 augmentations=adv_cfg.get("augmentations", {}),

@@ -53,6 +53,9 @@ class TrainingState:
     lr_history: List[float] = None
     lambda_history: List[float] = None
     time_elapsed: float = 0.0
+    # Data resume position
+    current_file_idx: int = 0
+    current_position: int = 0
 
     def __post_init__(self):
         if self.train_losses is None:
@@ -476,6 +479,8 @@ class NNUELightningModule(pl.LightningModule):
             self.config,
             streaming_manager=self.streaming_manager,
             is_train=True,
+            start_file=self.training_state.current_file_idx,
+            start_position=self.training_state.current_position,
         )
 
     def val_dataloader(self):
@@ -594,6 +599,9 @@ class NNUELightningModule(pl.LightningModule):
             self.training_state.lr_history = ts.get("lr_history", [])
             self.training_state.lambda_history = ts.get("lambda_history", [])
             self.training_state.time_elapsed = ts.get("time_elapsed", 0.0)
+            # Restore data resume position
+            self.training_state.current_file_idx = ts.get("current_file_idx", 0)
+            self.training_state.current_position = ts.get("current_position", 0)
             # Track previously elapsed time so time budget is correct across resumes
             self._resume_time_offset = ts.get("time_elapsed", 0.0)
         
