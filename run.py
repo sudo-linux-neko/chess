@@ -528,7 +528,7 @@ def run_full_training(config, is_kaggle):
             training_state=pl_module.training_state,
             config=config,
             ema_model=pl_module.ema_model,
-            is_best=True,
+            is_best=False,  # Final model may not be the best; don't overwrite best.pt
         )
         if ckpt_path and hf_uploader and hf_token:
             try:

@@ -307,12 +307,13 @@ class CheckpointManager:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
 
-        # Verify integrity
+        # Verify integrity (only if SHA256 was recorded)
         meta_path = path.with_suffix('.meta.json')
         if meta_path.exists():
             with open(meta_path) as f:
                 metadata = json.load(f)
-            if not self._verify_sha256(path, metadata.get('file_sha256', '')):
+            expected_sha = metadata.get('file_sha256', '')
+            if expected_sha and not self._verify_sha256(path, expected_sha):
                 raise RuntimeError(f"Checkpoint corruption detected: {path}")
 
         print(f"Loading checkpoint: {path}")

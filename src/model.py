@@ -89,9 +89,9 @@ class FeatureTransformer(nn.Module):
         """
         batch_size = x.shape[0]
 
-        # Reshape to (batch * 64, 1280) for shared linear
+        # Reshape to (batch, 64, 1280) for shared linear
         if x.dim() == 2:
-            x = x.view(batch_size, self.num_buckets, self.features_per_bucket)
+            x = x.reshape(batch_size, self.num_buckets, self.features_per_bucket)
 
         # (batch, 64, 1280) -> (batch * 64, 1280)
         x_flat = x.reshape(-1, self.features_per_bucket)

@@ -534,7 +534,7 @@ def run_training(config: dict) -> int:
         training_state=pl_module.training_state,
         config=config,
         ema_model=pl_module.ema_model,
-        is_best=True,
+        is_best=False,  # Final model may not be the best; don't overwrite best.pt
     )
 
     if ckpt_path:

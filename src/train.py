@@ -206,15 +206,29 @@ class NNUELightningModule(pl.LightningModule):
         self._last_global_step = -1  # Track PL global step for accurate accumulation boundaries
         self._last_log_step = -1  # Track last logged global step to avoid batch_idx misalignment
         
-        # RNG for lambda jitter (worker-safe)
+        # RNG for lambda jitter (worker-safe, seeded per-rank for DDP diversity)
         self._lambda_rng = torch.Generator()
         self._lambda_rng.manual_seed(config.get("seed", 42))
+
+        # Reseed lambda jitter based on global rank so each DDP process
+        # gets different jitter values (called after trainer is assigned)
+        self._lambda_rank_seeded = False
         
         # Save hyperparameters
         self.save_hyperparameters(config)
 
     def setup(self, stage: Optional[str] = None):
         """Setup called after model is moved to device."""
+        # Seed lambda jitter RNG per DDP rank for jitter diversity
+        if not getattr(self, '_lambda_rank_seeded', False):
+            try:
+                rank = self.trainer.global_rank
+            except Exception:
+                rank = 0
+            _lambda_seed = self.config.get("seed", 42) + rank * 10000
+            self._lambda_rng.manual_seed(_lambda_seed)
+            self._lambda_rank_seeded = True
+        
         # Enable TF32 for faster matmul on T4 (Ampere+)
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -267,7 +281,7 @@ class NNUELightningModule(pl.LightningModule):
         
         # Losses
         loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
-        loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
+        loss_eval = self.eval_loss_fn(eval_pred.squeeze(-1), eval_target)
         
         # Combined loss (unscaled - PL handles accumulation scaling)
         loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
@@ -461,7 +475,7 @@ class NNUELightningModule(pl.LightningModule):
                 # Use a FIXED lambda for validation (don't consume training RNG jitter)
                 lambda_val = self.start_lambda
                 loss_wdl = self.wdl_loss_fn(wdl_logits, wdl_target)
-                loss_eval = self.eval_loss_fn(eval_pred.squeeze(), eval_target)
+                loss_eval = self.eval_loss_fn(eval_pred.squeeze(-1), eval_target)
                 loss = lambda_val * loss_wdl + (1.0 - lambda_val) * loss_eval
         finally:
             # Restore training mode and RNG state
