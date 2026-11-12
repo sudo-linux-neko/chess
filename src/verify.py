@@ -290,10 +290,16 @@ class ExportVerifier:
         
         layers = self._load_nnue_layers(nnue_path)
         
+        # Compute input dimension from loaded layers
+        ft_in = layers["feature_transformer"]["weight"].shape[1]  # per-bucket features (1280)
+        hidden1_in = layers["hidden1"]["weight"].shape[1]  # total accumulator (16384)
+        num_buckets = hidden1_in // layers["feature_transformer"]["weight"].shape[0]  # 64
+        input_dim = ft_in * num_buckets  # 81920
+        
         results = {}
         for batch_size in batch_sizes:
             # Create random test data
-            test_data = np.random.randn(batch_size, 81920).astype(np.float32)
+            test_data = np.random.randn(batch_size, input_dim).astype(np.float32)
             
             # Warmup
             for _ in range(5):

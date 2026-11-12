@@ -368,15 +368,16 @@ class StreamingBinpackDataset(IterableDataset):
         feature_weights = weights.astype(np.float32)
         
         # Reuse thread-local buffer to avoid per-position allocation (~327KB each)
+        input_dim = self.config.get("model", {}).get("input_dim", 81920)
         if not hasattr(self, '_dense_buffer'):
             self._dense_buffer = threading.local()
         if not hasattr(self._dense_buffer, 'buf'):
-            self._dense_buffer.buf = np.zeros(81920, dtype=np.float32)
+            self._dense_buffer.buf = np.zeros(input_dim, dtype=np.float32)
         dense_features = self._dense_buffer.buf
         dense_features.fill(0.0)
         
         # Bounds check for safety
-        valid_mask = (feature_indices >= 0) & (feature_indices < 81920)
+        valid_mask = (feature_indices >= 0) & (feature_indices < input_dim)
         dense_features[feature_indices[valid_mask]] = feature_weights[valid_mask]
 
         # Apply augmentations
