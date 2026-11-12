@@ -229,17 +229,17 @@ class ExportVerifier:
                     raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
                 
-                bias_size = out_features * 4
-                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
-                if len(bias) < out_features:
-                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
-                bias = bias.reshape(out_features)
-                
                 scale_size = out_features * 4
                 scale = np.frombuffer(f.read(scale_size), dtype=np.float32)
                 if len(scale) < out_features:
                     raise ValueError(f"Invalid NNUE file: truncated scale for layer {name}")
                 scale = scale.reshape(out_features)
+                
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
                 
                 layers[name] = {
                     "weight": weight,

@@ -898,7 +898,11 @@ class OverfittingCallback(Callback):
     def restore_best_model(self, pl_module):
         """Restore the best model state (before overfitting)."""
         if self.best_model_state is not None:
-            pl_module.model.load_state_dict(self.best_model_state)
+            # Unwrap compiled model if needed
+            model = pl_module.model
+            if hasattr(model, '_orig_mod'):
+                model = model._orig_mod
+            model.load_state_dict(self.best_model_state)
             if pl_module.ema_model is not None:
                 pl_module.ema_model.load_state_dict(self.best_model_state)
             print(f"   ✅ Restored best model (val_loss={self.best_val_loss:.4f})")

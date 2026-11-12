@@ -257,11 +257,11 @@ class NNUEExporter:
         # Write weight (int8)
         f.write(layer.weight.tobytes())
         
+        # Write scale (float32) - Stockfish format: scales BEFORE bias
+        f.write(layer.scale.tobytes())
+        
         # Write bias (int32)
         f.write(layer.bias.tobytes())
-        
-        # Write scale (float32)
-        f.write(layer.scale.tobytes())
 
     def _write_nnue_float(self, path: Path, model: nn.Module, network_hash: str):
         with open(path, 'wb') as f:
@@ -394,17 +394,17 @@ class NNUEExporter:
                     raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
                 
-                bias_size = out_features * 4
-                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
-                if len(bias) < out_features:
-                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
-                bias = bias.reshape(out_features)
-                
                 scale_size = out_features * 4
                 scale = np.frombuffer(f.read(scale_size), dtype=np.float32)
                 if len(scale) < out_features:
                     raise ValueError(f"Invalid NNUE file: truncated scale for layer {name}")
                 scale = scale.reshape(out_features)
+                
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
                 
                 layers[name] = {
                     "weight": weight,
@@ -480,17 +480,17 @@ class NNUEExporter:
                     raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
                 
-                bias_size = out_features * 4
-                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
-                if len(bias) < out_features:
-                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
-                bias = bias.reshape(out_features)
-                
                 scale_size = out_features * 4
                 scale = np.frombuffer(f.read(scale_size), dtype=np.float32)
                 if len(scale) < out_features:
                     raise ValueError(f"Invalid NNUE file: truncated scale for layer {name}")
                 scale = scale.reshape(out_features)
+                
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.int32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
                 
                 layers[name] = QuantizedLayer(
                     weight=weight,
