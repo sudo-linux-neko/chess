@@ -100,9 +100,12 @@ for cmd in install_cmds:
 # 3. Compile C++ binpack loader (non-fatal)
 # -----------------------------------------------------------
 print("\n[3/8] Compiling C++ binpack loader...")
+if (REPO_DIR / "src/build_cpp_loader.py").exists():
+    cpp_cmd = [sys.executable, "src/build_cpp_loader.py"]
+else:
+    cpp_cmd = [sys.executable, "-c", "from src.data import compile_cpp_loader; print(compile_cpp_loader())"]
 cpp_result = subprocess.run(
-    [sys.executable, "src/build_cpp_loader.py" if (REPO_DIR / "src/build_cpp_loader.py").exists() else "-c",
-     "from src.data import compile_cpp_loader; print(compile_cpp_loader())" if not (REPO_DIR / "src/build_cpp_loader.py").exists() else ""],
+    cpp_cmd,
     capture_output=True, text=True, timeout=300,
     cwd=REPO_DIR
 )
