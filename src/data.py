@@ -194,11 +194,13 @@ class StreamingBinpackDataset(IterableDataset):
         # Curriculum: skip early game positions based on ply
         indices = list(range(start_pos, num_positions))
         
-        if self.curriculum_enabled:
-            # Curriculum: skip early game positions
-            # early_fen_skipping=18 means skip positions with ply < 18
+        if self.curriculum_enabled and start_pos == 0:
+            # Curriculum: skip early game positions only on fresh start (not resume).
+            # early_fen_skipping=18 means skip positions with ply < 18.
             # Without ply info in binpack data, approximate by skipping
-            # first (early_fen_skip / max_ply) fraction of positions
+            # first (early_fen_skip / max_ply) fraction of positions.
+            # On resume (start_pos > 0), we've already passed early game positions,
+            # so skipping again would incorrectly skip valid mid/late-game data.
             curriculum_cfg = self.config.get("training", {}).get("curriculum", {})
             early_fen_skip = curriculum_cfg.get("early_fen_skip", 18)
             max_ply = curriculum_cfg.get("max_ply", 64)
@@ -252,8 +254,9 @@ class StreamingBinpackDataset(IterableDataset):
 
                 indices = list(range(start_pos, num_positions))
                 
-                # Curriculum: skip early game
-                if self.curriculum_enabled:
+                # Curriculum: skip early game only on fresh start (not resume).
+                # On resume (start_pos > 0), we've already passed early game positions.
+                if self.curriculum_enabled and start_pos == 0:
                     curriculum_cfg = self.config.get("training", {}).get("curriculum", {})
                     early_fen_skip = curriculum_cfg.get("early_fen_skip", 18)
                     max_ply = curriculum_cfg.get("max_ply", 64)
