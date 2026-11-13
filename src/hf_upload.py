@@ -240,6 +240,8 @@ class HFUploader:
                 task.error = "huggingface_hub not available, no token, or repo not ready"
                 self._stats["failed"] += 1
                 self._queue.task_done()
+                # Brief sleep to avoid tight failure loop when HF is not ready
+                time.sleep(1.0)
                 continue
 
             # Process task with retries

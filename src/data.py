@@ -624,6 +624,11 @@ class StreamingDataManager:
                 
                 for filename in binpack_files:
                     filepath = self.data_dir / filename
+                    # Also check actual HF download path if symlink not available
+                    # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
+                    actual_path = self.data_dir / source.repo_id / filename
+                    if not filepath.exists() and actual_path.exists():
+                        filepath = actual_path
                     self._all_files.append(filepath)
                     if filepath.exists():
                         self._downloaded_files.add(filepath)
@@ -793,7 +798,7 @@ class StreamingDataManager:
             
         except Exception as e:
             print(f"Space check failed: {e}")
-            return True  # Assume OK
+            return False  # Don't assume OK - skip download to avoid disk-full
     
     def _cleanup_old_files(self, target_free_gb: float) -> bool:
         """Delete oldest files to free space, keeping recent ones."""

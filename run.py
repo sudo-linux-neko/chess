@@ -326,14 +326,20 @@ def run_full_training(config, is_kaggle):
     if resume_ckpt:
         try:
             print(f"  Resuming from: {resume_ckpt}")
-            # Optimizer/scheduler may not be available before trainer.fit()
+            # Optimizer/scheduler must be configured BEFORE load_checkpoint so their
+            # state can be restored. PL's optimizers()/lr_schedulers() return empty
+            # before trainer.fit(), so we call configure_optimizers() manually.
             try:
-                opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
-            except Exception:
+                opt_cfg = pl_module.configure_optimizers()
+                opt = opt_cfg["optimizer"]
+                lr_sched_cfg = opt_cfg.get("lr_scheduler")
+                if isinstance(lr_sched_cfg, dict):
+                    sched = lr_sched_cfg["scheduler"]
+                else:
+                    sched = lr_sched_cfg
+            except Exception as e:
+                print(f"  WARNING: Could not configure optimizers for resume: {e}")
                 opt = None
-            try:
-                sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
-            except Exception:
                 sched = None
             checkpoint_manager.load_checkpoint(
                 resume_ckpt,
@@ -382,12 +388,15 @@ def run_full_training(config, is_kaggle):
         try:
             # Optimizer/scheduler may not be available before trainer.fit()
             try:
-                opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+                opt_cfg = pl_module.configure_optimizers()
+                opt = opt_cfg["optimizer"]
+                lr_sched_cfg = opt_cfg.get("lr_scheduler")
+                if isinstance(lr_sched_cfg, dict):
+                    sched = lr_sched_cfg["scheduler"]
+                else:
+                    sched = lr_sched_cfg
             except Exception:
                 opt = None
-            try:
-                sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
-            except Exception:
                 sched = None
             ckpt_path = checkpoint_manager.save_checkpoint(
                 model=pl_module.model,
