@@ -445,11 +445,13 @@ def run_full_training(config, is_kaggle):
             if pl_module and checkpoint_manager:
                 print("  Saving emergency checkpoint...")
                 try:
-                    opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+                    optimizers = pl_module.optimizers()
+                    opt = optimizers[0] if optimizers else None
                 except Exception:
                     opt = None
                 try:
-                    sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+                    scheds = pl_module.lr_schedulers()
+                    sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
                 checkpoint_manager.save_checkpoint(
@@ -530,11 +532,13 @@ def run_full_training(config, is_kaggle):
     try:
         # Optimizer/scheduler should be available after trainer.fit()
         try:
-            opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+            optimizers = pl_module.optimizers()
+            opt = optimizers[0] if optimizers else None
         except Exception:
             opt = None
         try:
-            sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+            scheds = pl_module.lr_schedulers()
+            sched = scheds[0] if scheds else None
         except Exception:
             sched = None
         ckpt_path = checkpoint_manager.save_checkpoint(

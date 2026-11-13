@@ -202,6 +202,11 @@ class NNUELightningModule(pl.LightningModule):
         # but we need training_state.step to continue from checkpoint value.
         self._resume_step_offset = 0
         
+        # Samples seen at resume time - used to correctly estimate data position
+        # after resume (samples_seen includes pre-resume samples, so we need the
+        # delta to estimate post-resume position)
+        self._samples_seen_at_resume = 0
+        
         # Estimated positions per file (for approximate data position tracking on resume)
         # Populated lazily on first _update_data_position() call
         self._positions_per_file_estimate = None
@@ -541,12 +546,21 @@ class NNUELightningModule(pl.LightningModule):
         num_files = len(dataset.files)
         total_samples = self.training_state.samples_seen
         
-        # Estimate which file and position within file
-        files_completed = int(total_samples // ppf)
-        position_in_file = int(total_samples % ppf)
+        # Estimate position relative to resume start to avoid counting
+        # pre-resume samples toward post-resume position
+        samples_since_resume = total_samples - self._samples_seen_at_resume
+        if samples_since_resume < 0:
+            samples_since_resume = 0
         
-        self.training_state.current_file_idx = min(files_completed, num_files - 1)
-        self.training_state.current_position = min(position_in_file, ppf - 1)
+        # Estimate which file and position within file
+        files_completed = int(samples_since_resume // ppf)
+        position_in_file = int(samples_since_resume % ppf)
+        
+        # Offset by the resume start file/position
+        base_file = getattr(self, '_resume_start_file', 0)
+        base_position = getattr(self, '_resume_start_position', 0)
+        self.training_state.current_file_idx = min(base_file + files_completed, num_files - 1)
+        self.training_state.current_position = min(base_position + position_in_file, ppf - 1)
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step using EMA model."""
@@ -601,6 +615,11 @@ class NNUELightningModule(pl.LightningModule):
         # to skip already-processed files.
         start_file = self.training_state.current_file_idx
         start_position = self.training_state.current_position
+        # Track samples_seen at resume so _update_data_position() can correctly
+        # estimate post-resume position (samples_seen includes pre-resume samples)
+        self._samples_seen_at_resume = self.training_state.samples_seen
+        self._resume_start_file = start_file
+        self._resume_start_position = start_position
         loader = create_dataloader(
             self.config,
             streaming_manager=self.streaming_manager,
@@ -750,6 +769,10 @@ class NNUELightningModule(pl.LightningModule):
             # Track step offset so training_state.step continues from checkpoint value
             # even though PL's trainer.global_step starts at 0 on fresh Trainer
             self._resume_step_offset = ts.get("step", 0)
+            # Track samples seen at resume for correct data position estimation
+            self._samples_seen_at_resume = ts.get("samples_seen", 0)
+            self._resume_start_file = ts.get("current_file_idx", 0)
+            self._resume_start_position = ts.get("current_position", 0)
         
         # Load EMA state
         if "ema_state_dict" in checkpoint and self.ema_model is not None:
