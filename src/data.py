@@ -463,13 +463,26 @@ def download_file(
         req = urllib.request.Request(url, headers=resume_header)
         response = urllib.request.urlopen(req, timeout=30)
         
-        total_size = existing_size + int(response.headers.get("Content-Length", 0))
+        content_length = int(response.headers.get("Content-Length", 0))
+        
+        # Check if server honored the range request (206) or ignored it (200)
+        if response.status == 206 and existing_size > 0:
+            # Server sent remaining bytes only
+            total_size = existing_size + content_length
+            mode = "ab"
+        else:
+            # Server sent full file (ignored Range, or no resume requested)
+            total_size = content_length
+            existing_size = 0  # Reset since we're downloading fresh
+            mode = "wb"
+            # Clear tmp file since we're overwriting from scratch
+            if tmp_dest.exists():
+                tmp_dest.unlink()
         
         if max_size_gb and total_size > max_size_gb * 1024**3:
             print(f"File too large: {total_size / 1024**3:.1f}GB > {max_size_gb}GB")
             return False
-
-        mode = "ab" if existing_size > 0 else "wb"
+        
         with open(tmp_dest, mode) as f:
             downloaded = 0
             while True:
