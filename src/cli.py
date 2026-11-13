@@ -461,6 +461,46 @@ def run_training(config: dict) -> int:
         nonlocal shutdown_requested
         print("\nReceived interrupt signal, will stop after current batch...")
         shutdown_requested = True
+        # Save checkpoint before stopping (only rank 0 in DDP)
+        try:
+            if trainer.global_rank != 0:
+                trainer.should_stop = True
+                return
+        except Exception:
+            pass
+        try:
+            print("  Saving checkpoint on interrupt...")
+            try:
+                optimizers = pl_module.optimizers()
+                opt = optimizers[0] if optimizers else None
+            except Exception:
+                opt = None
+            try:
+                scheds = pl_module.lr_schedulers()
+                sched = scheds[0] if scheds else None
+            except Exception:
+                sched = None
+            ckpt_path = checkpoint_manager.save_checkpoint(
+                model=pl_module.model,
+                optimizer=opt,
+                scheduler=sched,
+                scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
+                training_state=pl_module.training_state,
+                config=config,
+                ema_model=pl_module.ema_model,
+                is_best=False,  # Interrupted model may not be best
+            )
+            if ckpt_path and hf_uploader:
+                try:
+                    hf_uploader.queue_upload(ckpt_path)
+                    meta_path = ckpt_path.with_suffix('.meta.json')
+                    if meta_path.exists():
+                        hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+                except Exception as e:
+                    print(f"  Checkpoint upload failed: {e}")
+            print(f"  Checkpoint saved: {ckpt_path}")
+        except Exception as e:
+            print(f"  Checkpoint save failed: {e}")
         trainer.should_stop = True
     
     signal.signal(signal.SIGINT, signal_handler)
