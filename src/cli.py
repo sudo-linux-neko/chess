@@ -16,7 +16,6 @@ Usage:
     python run.py --config configs/train_ultra.yaml --build-rust       # Build Rust loader with maturin
 """
 
-import os
 import sys
 import argparse
 import yaml
@@ -24,7 +23,6 @@ import time
 import signal
 import random
 from pathlib import Path
-from typing import Optional, Dict, Any
 
 import torch
 import numpy as np
@@ -34,12 +32,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.model import create_model
 from src.data import (create_dataloader, compile_cpp_loader, download_training_data, 
-                      StreamingBinpackDataset, DataSource, StreamingDataManager, StreamingConfig)
+                      DataSource, StreamingDataManager, StreamingConfig)
 from src.train import NNUELightningModule, create_trainer, OverfittingCallback
 from src.checkpoint import CheckpointManager, find_resumable_checkpoint
 from src.hf_upload import create_uploader
 from src.export import create_exporter
-from src.verify import verify_export_standalone, ExportVerifier
+from src.verify import ExportVerifier
 
 
 def load_config(config_path: str, overrides: dict = None) -> dict:

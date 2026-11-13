@@ -30,7 +30,6 @@ import time
 import signal
 import argparse
 import shutil
-import subprocess
 from pathlib import Path
 
 # Add src to path
@@ -207,12 +206,12 @@ def run_full_training(config, is_kaggle):
 
     from src.data import (
         create_dataloader, compile_cpp_loader, download_training_data,
-        StreamingBinpackDataset, DataSource, StreamingDataManager, StreamingConfig,
+        StreamingDataManager, StreamingConfig,
         StreamingMode
     )
     from src.train import NNUELightningModule, create_trainer, OverfittingCallback
     from src.checkpoint import CheckpointManager, find_resumable_checkpoint
-    from src.hf_upload import create_uploader, FakeHFUploader
+    from src.hf_upload import create_uploader
     from src.export import create_exporter
     from src.model import create_model
 

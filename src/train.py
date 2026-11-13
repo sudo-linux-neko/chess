@@ -19,14 +19,13 @@ import math
 import time
 import sys
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.utilities.grads import grad_norm
 
 try:
     from tqdm.auto import tqdm

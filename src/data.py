@@ -27,9 +27,8 @@ import subprocess
 import urllib.request
 import shutil
 from pathlib import Path
-from typing import Iterator, Optional, List, Tuple, Dict, Any, Union, Callable
-from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Iterator, Optional, List, Dict, Any
+from dataclasses import dataclass
 from collections import deque
 from enum import Enum
 

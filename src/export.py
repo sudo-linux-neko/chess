@@ -13,14 +13,13 @@ Optimizations:
 - EMA model export support
 """
 
-import os
 import struct
 import hashlib
 import torch
 import torch.nn as nn
 import numpy as np
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
 

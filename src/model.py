@@ -14,7 +14,6 @@ Based on official Stockfish nnue-pytorch and nettest best practices:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional, Dict, Any
 import math
 
