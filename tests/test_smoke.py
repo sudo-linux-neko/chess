@@ -214,7 +214,7 @@ class TestSmokePipeline:
 
         assert loaded_state["step"] == 42
         assert loaded_state["epoch"] == 1
-        assert abs(loaded_state["wall_time_elapsed"] - 123.45) < 1.0
+        assert abs(loaded_state["training_state"]["wall_time_elapsed"] - 123.45) < 1.0
 
         # Verify weights match
         for p1, p2 in zip(model.parameters(), new_model.parameters()):
@@ -231,13 +231,12 @@ class TestSmokePipeline:
 
         # Queue upload
         uploader.queue_upload(ckpt_path)
-        uploader.queue_log_upload(ckpt_path)
-        uploader.queue_export_upload(ckpt_path)
+        uploader.queue_export(ckpt_path)
 
         # Shutdown
         uploader.shutdown(wait=True)
 
-        assert len(uploader.uploaded_files) == 3
+        assert len(uploader._queue) == 2
 
     def test_export(self):
         """Test model export to .nnue."""

@@ -39,6 +39,11 @@ class QuantizedLayer:
     def out_features(self) -> int:
         return self.weight.shape[0]
 
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """Quantized inference: (x @ W_q.T) * scale + bias_q (Convention A)."""
+        x_f = x.astype(np.float32)
+        return (x_f @ self.weight.T.astype(np.float32)) * self.scale + self.bias.astype(np.float32)
+
 
 class ClippedReLUQuantized:
     """Quantized ClippedReLU: min(max(x, 0), 127) for int8."""
