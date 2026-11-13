@@ -221,6 +221,10 @@ class StreamingBinpackDataset(IterableDataset):
                     positions_yielded += 1
                 except Exception as e:
                     print(f"Error reading position {idx} from {filepath}: {e}")
+                    # Advance position past failed position so resume doesn't get stuck
+                    with self._position_lock:
+                        self.current_position = idx + 1
+                        self.current_file_idx = file_idx
                     continue
 
                 with self._position_lock:
@@ -272,6 +276,10 @@ class StreamingBinpackDataset(IterableDataset):
                             positions_yielded += 1
                         except Exception as e:
                             print(f"Error reading position {idx} from {filepath}: {e}")
+                            # Advance position past failed position so resume doesn't get stuck
+                            with self._position_lock:
+                                self.current_position = idx + 1
+                                self.current_file_idx = file_idx
                             continue
                         
                         with self._position_lock:
@@ -332,41 +340,29 @@ class StreamingBinpackDataset(IterableDataset):
         return (np.array(features), np.array(weights), np.array(wdl), eval_cp, game_result)
 
     def _apply_augmentations(self, features: np.ndarray, rng: random.Random) -> np.ndarray:
-        """Apply board symmetry augmentations (vectorized NumPy for speed)."""
+        """Apply board symmetry augmentations (vectorized NumPy for speed).
+        
+        NOTE: Augmentations are DISABLED by default for HalfKAv2_hm because
+        they require per-bucket feature index remapping (e.g., piece at file f
+        must map to file 7-f after horizontal flip), not just bucket reordering.
+        Without proper remapping, augmentations produce corrupted training data.
+        See train_ultra.yaml advanced.augmentations comments for details.
+        """
         if not self.augmentations:
             return features
 
-        # Get architecture dimensions from config
-        num_buckets = self.config.get("model", {}).get("num_buckets", 64)
-        features_per_bucket = self.config.get("model", {}).get("features_per_bucket", 1280)
+        # Check if any augmentation is enabled - all are unsafe without proper remapping
+        enabled = {k: v for k, v in self.augmentations.items() if v}
+        if enabled:
+            raise ValueError(
+                f"Augmentations are not safely implemented for HalfKAv2_hm: {enabled}. "
+                f"Bucket reordering alone corrupts data because features within "
+                f"buckets are not remapped. Keep all augmentations disabled "
+                f"(set flip_horizontal=false, flip_vertical=false, rotate_180=false, "
+                f"color_flip=false in config)."
+            )
 
-        # Reshape to (num_buckets, features_per_bucket) for bucket-wise ops
-        x = features.reshape(num_buckets, features_per_bucket).copy()
-
-        # Pre-compute flip indices for vectorized operations
-        # King square index = rank * 8 + file (rank 0-7, file 0-7)
-        # Horizontal flip: rank * 8 + (7 - file)
-        # Vertical flip: (7 - rank) * 8 + file
-        flip_h_idx = np.array([r * 8 + (7 - f) for r in range(8) for f in range(8)], dtype=np.int32)
-        flip_v_idx = np.array([(7 - r) * 8 + f for r in range(8) for f in range(8)], dtype=np.int32)
-
-        # Horizontal flip (flip file: a<->h, b<->g, etc.)
-        if self.augmentations.get("flip_horizontal", False) and rng.random() < 0.5:
-            x = x[flip_h_idx]
-
-        # Vertical flip (flip rank: 1<->8, 2<->7, etc.)
-        if self.augmentations.get("flip_vertical", False) and rng.random() < 0.5:
-            x = x[flip_v_idx]
-
-        # Color flip (swap sides) - requires feature index remapping
-        # For HalfKAv2, this is complex as it involves swapping white/black piece features
-        # Disabled by default in config - x[::-1] would corrupt data
-        if self.augmentations.get("color_flip", False) and rng.random() < 0.5:
-            # Placeholder - not implemented correctly for HalfKAv2_hm
-            # Would need proper feature index remapping
-            pass
-
-        return x.reshape(-1)
+        return features
 
     def _pos_to_tensors(self, pos_data: Any, rng: random.Random) -> Dict[str, torch.Tensor]:
         """

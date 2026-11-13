@@ -311,11 +311,15 @@ class NNUEExporter:
         with torch.no_grad():
             original_preds = original_model(test_data).cpu().numpy().squeeze(-1)
             
-            # Use Rust-accelerated verification if available
-            if self._rust_available:
-                exported_preds = self._run_rust_verification(nnue_path, test_data)
+            # Use appropriate inference method based on export format
+            if self.quantize:
+                # Use Rust-accelerated verification if available
+                if self._rust_available:
+                    exported_preds = self._run_rust_verification(nnue_path, test_data)
+                else:
+                    exported_preds = self._run_exported_inference(nnue_path, test_data)
             else:
-                exported_preds = self._run_exported_inference(nnue_path, test_data)
+                exported_preds = self._run_float_inference(nnue_path, test_data)
 
         abs_errors = np.abs(original_preds - exported_preds)
         mean_abs_error = float(np.mean(abs_errors))
@@ -534,6 +538,97 @@ class NNUEExporter:
         acc = x @ out.weight.T.astype(np.float32) * out.scale
         acc += out.bias.astype(np.float32)
         
+        return acc.squeeze(-1)
+
+    def _run_float_inference(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:
+        """Pure Python float inference for float-format .nnue files."""
+        with open(nnue_path, 'rb') as f:
+            magic = f.read(4)
+            if len(magic) < 4 or magic != b"NNUE":
+                raise ValueError(f"Invalid NNUE magic: {magic}")
+
+            version_bytes = f.read(4)
+            if len(version_bytes) < 4:
+                raise ValueError(f"Invalid NNUE file: too short (version)")
+            version = struct.unpack("<I", version_bytes)[0]
+            if version != 1:
+                raise ValueError(f"Unsupported NNUE version: {version}")
+
+            feature_hash = f.read(32)
+            if len(feature_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (feature_hash)")
+            network_hash = f.read(32)
+            if len(network_hash) < 32:
+                raise ValueError(f"Invalid NNUE file: too short (network_hash)")
+
+            layers = {}
+            layer_names = ["feature_transformer", "hidden1", "hidden2", "output"]
+
+            for name in layer_names:
+                in_features_bytes = f.read(4)
+                if len(in_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} in_features)")
+                in_features = struct.unpack("<I", in_features_bytes)[0]
+
+                out_features_bytes = f.read(4)
+                if len(out_features_bytes) < 4:
+                    raise ValueError(f"Invalid NNUE file: too short (layer {name} out_features)")
+                out_features = struct.unpack("<I", out_features_bytes)[0]
+
+                weight_size = out_features * in_features
+                weight = np.frombuffer(f.read(weight_size), dtype=np.float32)
+                if len(weight) < weight_size:
+                    raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
+                weight = weight.reshape(out_features, in_features)
+
+                bias_size = out_features * 4
+                bias = np.frombuffer(f.read(bias_size), dtype=np.float32)
+                if len(bias) < out_features:
+                    raise ValueError(f"Invalid NNUE file: truncated bias for layer {name}")
+                bias = bias.reshape(out_features)
+
+                layers[name] = {
+                    "weight": weight,
+                    "bias": bias,
+                    "in_features": in_features,
+                    "out_features": out_features,
+                }
+
+        x = test_data.cpu().numpy()
+        batch_size = x.shape[0]
+
+        ft = layers["feature_transformer"]
+        features_per_bucket = ft.weight.shape[1]   # 1280
+        ft_output = ft.weight.shape[0]             # 256
+        h1_in = layers["hidden1"].weight.shape[1]  # 16384
+        num_buckets = h1_in // ft_output               # 64
+
+        x = x.reshape(batch_size, num_buckets, features_per_bucket)
+
+        # Feature transformer
+        x_flat = x.reshape(-1, features_per_bucket)
+        acc = x_flat @ ft.weight.T
+        acc += ft.bias
+        x = acc.reshape(batch_size, num_buckets * ft_output)
+        x = np.clip(x, 0, 1.0)
+
+        # Hidden1
+        h1 = layers["hidden1"]
+        acc = x @ h1.weight.T
+        acc += h1.bias
+        x = np.clip(acc, 0, 1.0)
+
+        # Hidden2
+        h2 = layers["hidden2"]
+        acc = x @ h2.weight.T
+        acc += h2.bias
+        x = np.clip(acc, 0, 1.0)
+
+        # Output
+        out = layers["output"]
+        acc = x @ out.weight.T
+        acc += out.bias
+
         return acc.squeeze(-1)
 
 
