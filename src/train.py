@@ -656,7 +656,13 @@ class NNUELightningModule(pl.LightningModule):
         betas_raw = train_cfg.get("betas", (0.9, 0.999))
         if not isinstance(betas_raw, (list, tuple)):
             betas_raw = (float(betas_raw), 0.999)
-        betas = tuple(float(b) for b in betas_raw)
+        # Ensure exactly 2 betas (AdamW requires beta1, beta2)
+        betas_list = [float(b) for b in betas_raw]
+        if len(betas_list) == 0:
+            betas_list = [0.9, 0.999]
+        elif len(betas_list) == 1:
+            betas_list = [betas_list[0], 0.999]
+        betas = tuple(betas_list[:2])  # Take only first 2 if more provided
         eps = float(train_cfg.get("eps", 1e-8))
         
         # AdamW with factorized weight decay
