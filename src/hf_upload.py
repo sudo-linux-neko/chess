@@ -201,8 +201,10 @@ class HFUploader:
         # Priority queue: (-priority, sequence_counter, task)
         # sequence_counter prevents comparing UploadTask objects when
         # priority and timestamp are equal (UploadTask has no __lt__)
-        self._step_counter += 1
-        self._queue.put((-priority, self._step_counter, task))
+        with self._lock:
+            self._step_counter += 1
+            counter = self._step_counter
+        self._queue.put((-priority, counter, task))
         logger.debug(f"Queued upload: {local_path} -> {remote_path}")
 
     def queue_checkpoint(self, local_path: Union[str, Path], step: int):
@@ -242,8 +244,10 @@ class HFUploader:
                 # Re-queue task for later retry instead of losing it permanently
                 # Mark as pending again so it can be retried when HF becomes available
                 task.status = UploadStatus.PENDING
-                self._step_counter += 1
-                self._queue.put((-task.priority, self._step_counter, task))
+                with self._lock:
+                    self._step_counter += 1
+                    counter = self._step_counter
+                self._queue.put((-task.priority, counter, task))
                 self._queue.task_done()
                 # Brief sleep to avoid tight failure loop when HF is not ready
                 time.sleep(1.0)

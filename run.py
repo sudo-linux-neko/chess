@@ -375,6 +375,7 @@ def run_full_training(config, is_kaggle):
         # Only rank 0 saves checkpoints in DDP to prevent file corruption
         try:
             if trainer.global_rank != 0:
+                trainer.should_stop = True
                 return
         except Exception:
             pass
@@ -599,15 +600,12 @@ def run_full_training(config, is_kaggle):
             except Exception as e:
                 print(f"  Verification error: {e}")
 
-        if hf_uploader and hf_token:
+        # Upload export and shutdown uploader (always, even if export failed)
+        if hf_uploader:
             try:
-                if nnue_path:
+                if hf_token and nnue_path:
                     hf_uploader.queue_export(nnue_path)
-            except Exception as e:
-                print(f"  Export upload failed: {e}")
-
-            print("  Waiting for background uploads to complete...")
-            try:
+                print("  Waiting for background uploads to complete...")
                 hf_uploader.shutdown(wait=True, timeout=300)
             except Exception as e:
                 print(f"  Uploader shutdown warning: {e}")
@@ -615,6 +613,13 @@ def run_full_training(config, is_kaggle):
             print("  Skipping HF uploads (no HF_TOKEN)")
     except Exception as e:
         print(f"  Export failed: {e}")
+        # Still shutdown uploader on export failure
+        if hf_uploader:
+            try:
+                print("  Waiting for background uploads to complete...")
+                hf_uploader.shutdown(wait=True, timeout=300)
+            except Exception:
+                pass
 
     # Shutdown streaming manager
     if streaming_manager:
