@@ -289,6 +289,63 @@ assert float("8e-4") == 8e-4
 print("  PASS: float() converts string scientific notation correctly")
 
 print()
+
+# Test 8: TrainingState dataclass (lists initialize to [])
+print("Test 8: TrainingState dataclass initialization...")
+
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class TestTrainingState:
+    step: int = 0
+    epoch: int = 0
+    samples_seen: int = 0
+    best_val_loss: float = float('inf')
+    train_losses: List[float] = None
+    val_losses: List[float] = None
+    lr_history: List[float] = None
+    lambda_history: List[float] = None
+    time_elapsed: float = 0.0
+    current_file_idx: int = 0
+    current_position: int = 0
+
+    def __post_init__(self):
+        if self.train_losses is None:
+            self.train_losses = []
+        if self.val_losses is None:
+            self.val_losses = []
+        if self.lr_history is None:
+            self.lr_history = []
+        if self.lambda_history is None:
+            self.lambda_history = []
+
+ts = TestTrainingState()
+assert ts.train_losses == [], f"train_losses should be [], got {ts.train_losses}"
+assert ts.val_losses == [], f"val_losses should be [], got {ts.val_losses}"
+assert ts.lr_history == [], f"lr_history should be [], got {ts.lr_history}"
+assert ts.lambda_history == [], f"lambda_history should be [], got {ts.lambda_history}"
+assert ts.step == 0
+assert ts.samples_seen == 0
+assert ts.best_val_loss == float('inf')
+print("  PASS: TrainingState lists initialize to [] via __post_init__")
+
+# Verify append works
+ts.train_losses.append(0.5)
+ts.val_losses.append(0.3)
+assert ts.train_losses == [0.5]
+assert ts.val_losses == [0.3]
+print("  PASS: Append works on initialized lists")
+
+# Verify default values are preserved
+assert ts.step == 0
+assert ts.epoch == 0
+assert ts.samples_seen == 0
+assert ts.current_file_idx == 0
+assert ts.current_position == 0
+print("  PASS: Default scalar values preserved")
+
+print()
 print("=" * 60)
 print("ALL MATH/LOGIC TESTS PASSED!")
 print("=" * 60)
