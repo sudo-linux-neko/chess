@@ -344,6 +344,9 @@ def run_full_training(config, is_kaggle):
             # Restore _resume_time_offset so time budget accounts for previously elapsed time
             # (PL's on_load_checkpoint is not called since we load manually before trainer.fit())
             pl_module._resume_time_offset = pl_module.training_state.time_elapsed
+            # Track step offset so training_state.step continues from checkpoint value
+            # even though PL's trainer.global_step starts at 0 on fresh Trainer
+            pl_module._resume_step_offset = pl_module.training_state.step
             if pl_module.ema_model is not None:
                 # Strip _orig_mod. prefix from compiled model state_dict
                 # so EMA model (not compiled) can load this state

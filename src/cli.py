@@ -436,6 +436,9 @@ def run_training(config: dict) -> int:
         # Restore _resume_time_offset so time budget accounts for previously elapsed time
         # (PL's on_load_checkpoint is not called since we load manually before trainer.fit())
         pl_module._resume_time_offset = pl_module.training_state.time_elapsed
+        # Track step offset so training_state.step continues from checkpoint value
+        # even though PL's trainer.global_step starts at 0 on fresh Trainer
+        pl_module._resume_step_offset = pl_module.training_state.step
         # Sync EMA model with loaded weights
         if pl_module.ema_model is not None:
             # Strip _orig_mod. prefix from compiled model state_dict
@@ -544,13 +547,6 @@ def run_training(config: dict) -> int:
         meta_path = ckpt_path.with_suffix('.meta.json')
         if meta_path.exists():
             hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
-
-    # Ensure background uploads complete before exit
-    if hf_uploader:
-        try:
-            hf_uploader.shutdown(wait=True)
-        except Exception:
-            pass
 
     # Report learning status
     print("\n" + "=" * 60)

@@ -198,6 +198,10 @@ class NNUELightningModule(pl.LightningModule):
         # Resume time offset: previously elapsed time before this process started
         self._resume_time_offset = 0.0
         
+        # Resume step offset: PL's trainer.global_step starts at 0 on fresh Trainer,
+        # but we need training_state.step to continue from checkpoint value.
+        self._resume_step_offset = 0
+        
         # Estimated positions per file (for approximate data position tracking on resume)
         # Populated lazily on first _update_data_position() call
         self._positions_per_file_estimate = None
@@ -350,11 +354,11 @@ class NNUELightningModule(pl.LightningModule):
             return
         self._last_global_step = current_step
         
-        # Sync training_state.step with PL's global_step (source of truth)
-        # Previously we incremented separately which caused an off-by-one:
-        # _last_global_step started at -1, so on first call with global_step=0,
-        # training_state.step became 1 while global_step was 0.
-        self.training_state.step = current_step
+        # Sync training_state.step with PL's global_step, accounting for resume offset.
+        # PL's trainer.global_step starts at 0 on a fresh Trainer instance, but after
+        # resume we need step to continue from the checkpoint value (e.g., step N).
+        # So: training_state.step = current_step + _resume_step_offset.
+        self.training_state.step = current_step + self._resume_step_offset
         
         # Update EMA
         if self.ema_model is not None:
@@ -743,6 +747,9 @@ class NNUELightningModule(pl.LightningModule):
             self.training_state.current_position = ts.get("current_position", 0)
             # Track previously elapsed time so time budget is correct across resumes
             self._resume_time_offset = ts.get("time_elapsed", 0.0)
+            # Track step offset so training_state.step continues from checkpoint value
+            # even though PL's trainer.global_step starts at 0 on fresh Trainer
+            self._resume_step_offset = ts.get("step", 0)
         
         # Load EMA state
         if "ema_state_dict" in checkpoint and self.ema_model is not None:
