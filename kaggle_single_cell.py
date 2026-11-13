@@ -61,8 +61,12 @@ else:
             ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", "master"],
             capture_output=True, text=True, timeout=120
         )
-        subprocess.run(["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/master"],
-                       capture_output=True, text=True, timeout=60)
+        result2 = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/master"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result2.returncode != 0:
+            print(f"  WARNING: git reset failed: {result2.stderr}")
 
 print(f"  Repo at: {REPO_DIR}")
 os.chdir(REPO_DIR)

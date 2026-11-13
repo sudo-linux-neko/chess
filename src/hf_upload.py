@@ -183,9 +183,13 @@ class HFUploader:
         if remote_path is None:
             remote_path = local_path.name
 
-        # Compute SHA256 for integrity
-        sha256 = self._compute_sha256(local_path)
-        file_size = local_path.stat().st_size
+        # Compute SHA256 for integrity (file may be deleted between exists check and here)
+        try:
+            sha256 = self._compute_sha256(local_path)
+            file_size = local_path.stat().st_size
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(f"File inaccessible for upload: {local_path} - {e}")
+            return
 
         task = UploadTask(
             local_path=local_path,
@@ -242,6 +246,15 @@ class HFUploader:
 
             if not self._hf_available or not api or not repo_ready:
                 # Re-queue task for later retry instead of losing it permanently
+                # Check max_retries to avoid infinite re-queueing when HF is unavailable
+                if task.retries >= task.max_retries:
+                    task.status = UploadStatus.FAILED
+                    task.error = "HF unavailable - max retries exceeded"
+                    with self._lock:
+                        self._stats["failed"] += 1
+                    self._queue.task_done()
+                    logger.error(f"Upload failed permanently (HF unavailable): {task.remote_path}")
+                    continue
                 # Mark as pending again so it can be retried when HF becomes available
                 task.status = UploadStatus.PENDING
                 with self._lock:

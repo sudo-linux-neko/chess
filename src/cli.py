@@ -592,12 +592,15 @@ def run_training(config: dict) -> int:
         is_best=False,  # Final model may not be the best; don't overwrite best.pt
     )
 
-    if ckpt_path:
-        hf_uploader.queue_upload(ckpt_path)
-        # Also upload metadata JSON with loss, time, etc.
-        meta_path = ckpt_path.with_suffix('.meta.json')
-        if meta_path.exists():
-            hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+    if ckpt_path and hf_uploader:
+        try:
+            hf_uploader.queue_upload(ckpt_path)
+            # Also upload metadata JSON with loss, time, etc.
+            meta_path = ckpt_path.with_suffix('.meta.json')
+            if meta_path.exists():
+                hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+        except Exception as e:
+            print(f"  Checkpoint upload failed: {e}")
 
     # Report learning status
     print("\n" + "=" * 60)
