@@ -563,7 +563,7 @@ def run_full_training(config, is_kaggle):
         use_ema_export = pl_module.ema_model is not None
         nnue_path = exporter.export(
             pl_module.ema_model if use_ema_export else pl_module.model,
-            test_data, use_ema=use_ema_export
+            calibration_data=test_data, use_ema=use_ema_export
         )
 
         if config.get("export", {}).get("verify", True):

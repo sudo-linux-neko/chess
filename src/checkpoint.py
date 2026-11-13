@@ -348,7 +348,13 @@ class CheckpointManager:
 
         # Load EMA
         if ema_model is not None and "ema_model" in checkpoint:
-            ema_model.load_state_dict(checkpoint["ema_model"])
+            ema_state = checkpoint["ema_model"]
+            # Strip _orig_mod. prefix for compatibility with compiled models
+            clean_ema_state = {}
+            for k, v in ema_state.items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                clean_ema_state[clean_key] = v
+            ema_model.load_state_dict(clean_ema_state)
 
         # Return training state and data state for manual restoration
         result = {

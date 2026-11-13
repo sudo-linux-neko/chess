@@ -56,7 +56,7 @@ class ExportVerifier:
         original_model = original_model.to(test_data.device)
         
         with torch.no_grad():
-            original_preds = original_model(test_data).cpu().numpy().squeeze()
+            original_preds = original_model(test_data).cpu().numpy().squeeze(-1)
             
             # Use Rust if available for speed
             if self._rust_available:

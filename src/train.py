@@ -198,6 +198,10 @@ class NNUELightningModule(pl.LightningModule):
         # Resume time offset: previously elapsed time before this process started
         self._resume_time_offset = 0.0
         
+        # Estimated positions per file (for approximate data position tracking on resume)
+        # Populated lazily on first _update_data_position() call
+        self._positions_per_file_estimate = None
+        
         # Time budget
         time_cfg = config.get("time_budget", {})
         self.max_time_seconds = time_cfg.get("hours", 9.5) * 3600
@@ -339,6 +343,11 @@ class NNUELightningModule(pl.LightningModule):
         self.training_state.step += 1
         self.training_state.samples_seen += self.micro_batch_size * self.accum_steps
         
+        # Track approximate data position for resume (computed in main process)
+        # Dataset position updates in worker processes don't propagate to main process,
+        # so we estimate from samples_seen using positions-per-file from first file.
+        self._update_data_position()
+        
         # Checkpointing
         self._maybe_checkpoint()
         
@@ -413,12 +422,12 @@ class NNUELightningModule(pl.LightningModule):
         if self.trainer.global_rank != 0:
             return
         try:
-            # Sync data position from dataset before saving
-            dataset = getattr(self, 'train_dataset', None)
-            if dataset is not None:
-                self.training_state.current_file_idx = getattr(dataset, 'current_file_idx', 0)
-                self.training_state.current_position = getattr(dataset, 'current_position', 0)
-
+            # Sync data position from training_state (computed in on_train_batch_end
+            # from samples_seen). Do NOT read from self.train_dataset because
+            # dataset position updates happen in worker processes (separate memory
+            # space with spawn multiprocessing) and never propagate to main process.
+            # The training_state values are always current.
+            
             # Update cumulative time_elapsed before saving
             self.training_state.time_elapsed = time.time() - self._global_start_time + self._resume_time_offset
             
@@ -452,6 +461,48 @@ class NNUELightningModule(pl.LightningModule):
         """Check if time budget exceeded."""
         elapsed = time.time() - self._global_start_time + self._resume_time_offset
         return elapsed >= self.max_time_seconds
+
+    def _update_data_position(self):
+        """Estimate current data file/position from samples_seen for resume.
+        
+        Dataset position updates happen in worker processes (separate memory space
+        with spawn multiprocessing) and never propagate to main process. We estimate
+        position from samples_seen using positions-per-file from the first file.
+        """
+        dataset = getattr(self, 'train_dataset', None)
+        if dataset is None or not hasattr(dataset, 'files') or len(dataset.files) == 0:
+            return
+        
+        # Lazily estimate positions per file from first file
+        if self._positions_per_file_estimate is None:
+            try:
+                first_file = dataset.files[0]
+                from src.data import CPP_LOADER_AVAILABLE, CppBinpackDataset
+                if CPP_LOADER_AVAILABLE:
+                    ds = CppBinpackDataset(str(first_file))
+                    self._positions_per_file_estimate = len(ds)
+                else:
+                    import struct
+                    with open(first_file, 'rb') as f:
+                        f.read(4)  # magic
+                        f.read(4)  # version
+                        self._positions_per_file_estimate = struct.unpack("<Q", f.read(8))[0]
+            except Exception:
+                self._positions_per_file_estimate = 100000  # fallback
+        
+        ppf = self._positions_per_file_estimate
+        if ppf <= 0:
+            return
+        
+        num_files = len(dataset.files)
+        total_samples = self.training_state.samples_seen
+        
+        # Estimate which file and position within file
+        files_completed = int(total_samples // ppf)
+        position_in_file = int(total_samples % ppf)
+        
+        self.training_state.current_file_idx = min(files_completed, num_files - 1)
+        self.training_state.current_position = min(position_in_file, ppf - 1)
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step using EMA model."""

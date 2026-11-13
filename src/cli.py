@@ -322,7 +322,7 @@ def run_smoke_test(config: dict) -> int:
     print("\n6. Testing export...")
     exporter = create_exporter(config)
     test_data = torch.randn(10, config.get("model", {}).get("input_dim", 81920))
-    nnue_path = exporter.export(pl_module.model, test_data)
+    nnue_path = exporter.export(pl_module.model, calibration_data=None, use_ema=False)
     print(f"Exported: {nnue_path}")
 
     print("\n7. Testing verification...")
@@ -592,7 +592,7 @@ def run_training(config: dict) -> int:
     use_ema_export = pl_module.ema_model is not None
     nnue_path = exporter.export(
         pl_module.ema_model if use_ema_export else pl_module.model,
-        test_data, use_ema=use_ema_export
+        calibration_data=test_data, use_ema=use_ema_export
     )
 
     if config.get("export", {}).get("verify", True):
@@ -650,7 +650,7 @@ def run_export_only(config: dict) -> int:
         print(f"  Warning: Could not get test data: {e}")
         test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
-    nnue_path = exporter.export(model, test_data, use_ema=False)
+    nnue_path = exporter.export(model, calibration_data=test_data, use_ema=False)
 
     if config.get("export", {}).get("verify", True):
         result = exporter.verify_export(model, nnue_path, test_data)

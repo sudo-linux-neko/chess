@@ -250,7 +250,7 @@ class TestSmokePipeline:
         test_data = torch.randn(10, self.config["model"]["input_dim"])
 
         # Export
-        nnue_path = exporter.export(model, test_data)
+        nnue_path = exporter.export(model, calibration_data=test_data)
 
         assert nnue_path.exists()
         assert nnue_path.suffix == ".nnue"
