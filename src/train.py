@@ -213,6 +213,9 @@ class NNUELightningModule(pl.LightningModule):
         # Populated lazily on first _update_data_position() call
         self._positions_per_file_estimate = None
         
+        # Flag to ensure train_dataloader() only uses resume position on first call
+        self._first_train_dataloader = True
+        
         # Time budget
         time_cfg = config.get("time_budget", {})
         self.max_time_seconds = time_cfg.get("hours", 9.5) * 3600
@@ -640,19 +643,31 @@ class NNUELightningModule(pl.LightningModule):
                     self.training_state.best_val_loss = val_loss.item()
 
     def train_dataloader(self):
-        """Return training dataloader."""
-        # Capture resume position before creating dataset, then reset it
-        # so subsequent epochs start fresh (normal multi-epoch training).
-        # Without this, _update_data_position() estimates position from
-        # samples_seen (which includes pre-resume samples), causing epoch 2+
-        # to skip already-processed files.
-        start_file = self.training_state.current_file_idx
-        start_position = self.training_state.current_position
-        # Track samples_seen at resume so _update_data_position() can correctly
-        # estimate post-resume position (samples_seen includes pre-resume samples)
-        self._samples_seen_at_resume = self.training_state.samples_seen
-        self._resume_start_file = start_file
-        self._resume_start_position = start_position
+        """Return training dataloader.
+        
+        Only the first call after setup/resume uses the checkpoint resume
+        position. Subsequent epochs (epoch 2+) must start from file 0, position 0
+        for normal multi-epoch training. Otherwise epoch 2+ would start from the
+        position where epoch 1 ended (mid-file), causing data to be skipped or
+        re-read incorrectly.
+        """
+        # Only use resume position on the very first dataloader creation
+        # (right after checkpoint resume). For subsequent epochs, start fresh.
+        use_resume_pos = getattr(self, '_first_train_dataloader', True)
+        self._first_train_dataloader = False
+        
+        if use_resume_pos:
+            start_file = self.training_state.current_file_idx
+            start_position = self.training_state.current_position
+            # Track samples_seen at resume so _update_data_position() can correctly
+            # estimate post-resume position (samples_seen includes pre-resume samples)
+            self._samples_seen_at_resume = self.training_state.samples_seen
+            self._resume_start_file = start_file
+            self._resume_start_position = start_position
+        else:
+            start_file = 0
+            start_position = 0
+        
         loader = create_dataloader(
             self.config,
             streaming_manager=self.streaming_manager,
