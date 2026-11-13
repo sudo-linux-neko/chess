@@ -297,13 +297,14 @@ def run_smoke_test(config: dict) -> int:
         fit_ok = True
     except Exception as e:
         print(f"  Training error: {e}")
-    finally:
+    # NOTE: Do NOT shutdown hf_uploader here - it's still needed below
+    # for checkpoint upload. Shutdown happens at end of smoke test.
+    if not fit_ok:
         if hf_uploader:
             try:
                 hf_uploader.shutdown(wait=True)
             except Exception:
                 pass
-    if not fit_ok:
         return 1
     elapsed = time.time() - start
     print(f"Training completed in {elapsed:.1f}s")
