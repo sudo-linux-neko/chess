@@ -290,6 +290,20 @@ class NNUELightningModule(pl.LightningModule):
                     print("  Scheduler state restored from checkpoint")
             except Exception as e:
                 print(f"  Warning: Could not restore scheduler state: {e}")
+        
+        # Restore EMA state from checkpoint (setup() created the EMA model,
+        # now we overwrite it with the checkpointed EMA weights)
+        if getattr(self, '_ema_state_dict', None) and self.ema_model is not None:
+            try:
+                # Strip _orig_mod. prefix if present in checkpointed EMA state
+                clean_ema_state = {}
+                for k, v in self._ema_state_dict.items():
+                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                    clean_ema_state[clean_key] = v
+                self.ema_model.load_state_dict(clean_ema_state)
+                print("  EMA state restored from checkpoint")
+            except Exception as e:
+                print(f"  Warning: Could not restore EMA state: {e}")
 
     def on_train_batch_start(self, batch: Any, batch_idx: int):
         """Track step timing."""

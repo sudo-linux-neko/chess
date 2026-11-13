@@ -440,6 +440,8 @@ def run_training(config: dict) -> int:
         # (PL creates its own optimizers during fit(), so we restore state into them there)
         pl_module._optimizer_state = checkpoint_result.get("optimizer_state", {})
         pl_module._scheduler_state = checkpoint_result.get("scheduler_state", {})
+        # Store EMA state dict for restoration in on_train_start() after setup() creates the EMA model
+        pl_module._ema_state_dict = checkpoint_result.get("ema_state_dict", {})
         # Restore _resume_time_offset so time budget accounts for previously elapsed time
         # (PL's on_load_checkpoint is not called since we load manually before trainer.fit())
         pl_module._resume_time_offset = pl_module.training_state.time_elapsed
@@ -451,14 +453,8 @@ def run_training(config: dict) -> int:
         pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
         pl_module._resume_start_file = pl_module.training_state.current_file_idx
         pl_module._resume_start_position = pl_module.training_state.current_position
-        # Sync EMA model with loaded weights
-        if pl_module.ema_model is not None:
-            # Strip _orig_mod. prefix from compiled model state_dict
-            raw_state = {}
-            for k, v in pl_module.model.state_dict().items():
-                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                raw_state[clean_key] = v.clone()
-            pl_module.ema_model.load_state_dict(raw_state)
+        # Note: EMA model sync is deferred to on_train_start() because setup() hasn't
+        # created pl_module.ema_model yet at this point (before trainer.fit()).
 
     # Create trainer with streaming manager
     trainer = create_trainer(config, checkpoint_manager, hf_uploader)

@@ -385,6 +385,7 @@ class CheckpointManager:
             "step": checkpoint.get("step", 0),
             "optimizer_state": checkpoint.get("optimizer", {}),
             "scheduler_state": checkpoint.get("scheduler", {}),
+            "ema_state_dict": checkpoint.get("ema_state_dict", {}),
         }
 
         if training_state is not None and "training_state" in checkpoint:

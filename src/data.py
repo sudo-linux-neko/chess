@@ -1221,7 +1221,6 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
             if attempt < max_retries - 1:
                 print(f"HF download failed (attempt {attempt+1}/{max_retries}): {e}")
                 print(f"Retrying in {retry_delay}s...")
-                import time
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:

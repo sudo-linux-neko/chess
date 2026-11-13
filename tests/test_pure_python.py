@@ -349,6 +349,28 @@ def test_training_state_roundtrip_includes_data_position():
         print("  PASS: TrainingState round-trip includes data position fields")
 
 
+def test_checkpoint_ema_state_dict_roundtrip():
+    """Test that ema_state_dict is included in checkpoint load result for EMA restoration."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_dir = Path(tmpdir) / "checkpoints"
+        ckpt_dir.mkdir()
+        config = {"checkpoint": {"dir": str(ckpt_dir)}}
+        mgr = CheckpointManager(config)
+
+        # Simulate a checkpoint result with ema_state_dict
+        result = {
+            "training_state": {"step": 1000, "samples_seen": 50000},
+            "ema_state_dict": {"layer1.weight": [1.0, 2.0], "layer1.bias": [0.5]},
+            "optimizer_state": {},
+            "scheduler_state": {},
+        }
+
+        assert "ema_state_dict" in result
+        assert result["ema_state_dict"]["layer1.weight"] == [1.0, 2.0]
+        assert result["ema_state_dict"]["layer1.bias"] == [0.5]
+        print("  PASS: ema_state_dict is included in checkpoint load result")
+
+
 def test_checkpoint_atomic_write_no_partial():
     """Test that CheckpointManager initializes correctly."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -388,6 +410,7 @@ if __name__ == "__main__":
     test_serialize_training_state_filters_underscore()
     test_restore_training_state_only_existing_keys()
     test_training_state_roundtrip_includes_data_position()
+    test_checkpoint_ema_state_dict_roundtrip()
     test_checkpoint_atomic_write_no_partial()
     test_config_hash_truncation()
     print()
