@@ -322,8 +322,9 @@ def run_smoke_test(config: dict) -> int:
                 hf_uploader.queue_upload(ckpt_path)
             except Exception as e:
                 print(f"  Upload warning: {e}")
-        if hf_uploader:
-            hf_uploader.shutdown(wait=True)
+    
+    if hf_uploader:
+        hf_uploader.shutdown(wait=True)
 
     print("\n6. Testing export...")
     exporter = create_exporter(config)
@@ -712,7 +713,13 @@ def run_export_only(config: dict) -> int:
         print(f"  Warning: Could not get test data: {e}")
         test_data = torch.zeros(100, config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
-    nnue_path = exporter.export(model, calibration_data=test_data, use_ema=False)
+    nnue_path = None
+    try:
+        nnue_path = exporter.export(model, calibration_data=test_data, use_ema=False)
+        print(f"Exported: {nnue_path}")
+    except Exception as e:
+        print(f"Export error: {e}")
+        return 1
 
     if config.get("export", {}).get("verify", True):
         try:
