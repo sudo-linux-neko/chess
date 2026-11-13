@@ -642,8 +642,9 @@ class StreamingDataManager:
                     link_path = self.data_dir / filename
                     actual_path = self.data_dir / source.repo_id / filename
                     
-                    # If symlink already exists - mark as downloaded/active
-                    if link_path.exists() or link_path.is_symlink():
+                    # If symlink already exists AND target is valid - mark as downloaded/active
+                    # (exists() returns False for broken symlinks, so they'll be re-downloaded)
+                    if link_path.exists():
                         self._all_files.append(link_path)
                         self._downloaded_files.add(link_path)
                         self._active_files.append(link_path)
@@ -713,7 +714,15 @@ class StreamingDataManager:
         """Download a single file with space management."""
         with self._lock:
             if filepath in self._downloaded_files:
-                return True
+                # File was downloaded before - verify it still exists (cleanup may have deleted it)
+                if filepath.exists():
+                    return True
+                # File was deleted by cleanup - remove from tracking and re-download
+                self._downloaded_files.discard(filepath)
+                try:
+                    self._active_files.remove(filepath)
+                except ValueError:
+                    pass
         
         # Check space before download
         if not self._ensure_space_for_download(filepath):
@@ -854,6 +863,7 @@ class StreamingDataManager:
                             pass
                         del self._actual_paths[str(f)]
                     self._active_files.remove(f)
+                    self._downloaded_files.discard(f)  # Allow re-download after cleanup
                     freed += size
                     print(f"  Deleted: {f.name} ({size/1024**3:.2f}GB)")
                     
