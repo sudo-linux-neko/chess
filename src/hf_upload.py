@@ -89,7 +89,7 @@ class HFUploader:
             "start_time": time.time(),
         }
         self._lock = threading.Lock()
-        self._step_counter = 0
+        self._step_counter = 0  # Monotonic counter for PriorityQueue tiebreaking
 
         # Try to import huggingface_hub
         self._hf_available = False
@@ -198,8 +198,11 @@ class HFUploader:
             sha256=sha256,
         )
 
-        # Priority queue: lower number = higher priority
-        self._queue.put((-priority, time.time(), task))
+        # Priority queue: (-priority, sequence_counter, task)
+        # sequence_counter prevents comparing UploadTask objects when
+        # priority and timestamp are equal (UploadTask has no __lt__)
+        self._step_counter += 1
+        self._queue.put((-priority, self._step_counter, task))
         logger.debug(f"Queued upload: {local_path} -> {remote_path}")
 
     def queue_checkpoint(self, local_path: Union[str, Path], step: int):

@@ -347,6 +347,11 @@ def run_full_training(config, is_kaggle):
             # Track step offset so training_state.step continues from checkpoint value
             # even though PL's trainer.global_step starts at 0 on fresh Trainer
             pl_module._resume_step_offset = pl_module.training_state.step
+            # Restore samples_seen_at_resume and resume start position so _update_data_position()
+            # correctly estimates post-resume data position (not counting pre-resume samples)
+            pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
+            pl_module._resume_start_file = pl_module.training_state.current_file_idx
+            pl_module._resume_start_position = pl_module.training_state.current_position
             if pl_module.ema_model is not None:
                 # Strip _orig_mod. prefix from compiled model state_dict
                 # so EMA model (not compiled) can load this state

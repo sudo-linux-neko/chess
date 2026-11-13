@@ -304,6 +304,51 @@ def test_restore_training_state_only_existing_keys():
         print("  PASS: _restore_training_state only sets existing keys")
 
 
+def test_training_state_roundtrip_includes_data_position():
+    """Test that serialize/restore round-trips data position fields (current_file_idx, current_position)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_dir = Path(tmpdir) / "checkpoints"
+        ckpt_dir.mkdir()
+        config = {"checkpoint": {"dir": str(ckpt_dir)}}
+        mgr = CheckpointManager(config)
+
+        class FakeState:
+            def __init__(self):
+                self.step = 100000
+                self.epoch = 5
+                self.samples_seen = 5000000
+                self.current_file_idx = 42
+                self.current_position = 12345
+                self.best_val_loss = 0.42
+                self.time_elapsed = 3600.0
+                self._internal = "should_be_filtered"
+
+        state = FakeState()
+        serialized = mgr._serialize_training_state(state)
+
+        # Data position fields must be serialized
+        assert serialized["current_file_idx"] == 42
+        assert serialized["current_position"] == 12345
+        assert serialized["samples_seen"] == 5000000
+        assert serialized["step"] == 100000
+        assert "_internal" not in serialized
+
+        # Round-trip restore
+        new_state = FakeState()
+        new_state.step = 0
+        new_state.current_file_idx = 0
+        new_state.current_position = 0
+        mgr._restore_training_state(new_state, serialized)
+
+        assert new_state.current_file_idx == 42
+        assert new_state.current_position == 12345
+        assert new_state.samples_seen == 5000000
+        assert new_state.step == 100000
+        # _internal was set in __init__, not restored from serialized dict
+        assert new_state._internal == "should_be_filtered"
+        print("  PASS: TrainingState round-trip includes data position fields")
+
+
 def test_checkpoint_atomic_write_no_partial():
     """Test that CheckpointManager initializes correctly."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -342,6 +387,7 @@ if __name__ == "__main__":
     test_hash_config_and_alias()
     test_serialize_training_state_filters_underscore()
     test_restore_training_state_only_existing_keys()
+    test_training_state_roundtrip_includes_data_position()
     test_checkpoint_atomic_write_no_partial()
     test_config_hash_truncation()
     print()

@@ -324,7 +324,8 @@ def run_smoke_test(config: dict) -> int:
                 hf_uploader.queue_upload(ckpt_path)
             except Exception as e:
                 print(f"  Upload warning: {e}")
-        hf_uploader.shutdown(wait=True) if hf_uploader else None
+        if hf_uploader:
+            hf_uploader.shutdown(wait=True)
 
     print("\n6. Testing export...")
     exporter = create_exporter(config)
@@ -445,6 +446,11 @@ def run_training(config: dict) -> int:
         # Track step offset so training_state.step continues from checkpoint value
         # even though PL's trainer.global_step starts at 0 on fresh Trainer
         pl_module._resume_step_offset = pl_module.training_state.step
+        # Restore samples_seen_at_resume and resume start position so _update_data_position()
+        # correctly estimates post-resume data position (not counting pre-resume samples)
+        pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
+        pl_module._resume_start_file = pl_module.training_state.current_file_idx
+        pl_module._resume_start_position = pl_module.training_state.current_position
         # Sync EMA model with loaded weights
         if pl_module.ema_model is not None:
             # Strip _orig_mod. prefix from compiled model state_dict
