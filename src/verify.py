@@ -130,7 +130,10 @@ class ExportVerifier:
             )
         except TypeError:
             # Try alternative API with QuantizedLayer objects
-            from src.export import QuantizedLayer
+            try:
+                from src.export import QuantizedLayer
+            except ImportError:
+                from export import QuantizedLayer
             qlayers = {
                 name: QuantizedLayer(
                     weight=layers[name]["weight"],

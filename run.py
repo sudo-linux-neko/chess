@@ -418,7 +418,13 @@ def run_full_training(config, is_kaggle):
                 is_best=False,  # Interrupted model may not be best; don't overwrite best.pt
             )
             if ckpt_path and hf_uploader:
-                hf_uploader.queue_upload(ckpt_path)
+                try:
+                    hf_uploader.queue_upload(ckpt_path)
+                    meta_path = ckpt_path.with_suffix('.meta.json')
+                    if meta_path.exists():
+                        hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+                except Exception as e:
+                    print(f"  Checkpoint upload failed: {e}")
             print(f"  Checkpoint saved: {ckpt_path}")
         except Exception as e:
             print(f"  Checkpoint save failed: {e}")

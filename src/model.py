@@ -138,7 +138,7 @@ class NNUEModel(nn.Module):
 
         # Hidden layers - using separate Linear + clamp for torch.compile compatibility
         self.hidden1_linear = nn.Linear(
-            model_cfg.get("ft_output") * model_cfg.get("num_buckets", 64), 
+            model_cfg.get("ft_output", 256) * model_cfg.get("num_buckets", 64), 
             model_cfg.get("hidden1", 256)
         )
         self.hidden2_linear = nn.Linear(

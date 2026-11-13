@@ -471,7 +471,7 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                     repo_id = f"{username}/{hf_cfg.get('repo_name', 'chess-nnue')}"
         
         if repo_id:
-            files = list_repo_files(repo_id=repo_id, repo_type="model")
+            files = list_repo_files(repo_id=repo_id, repo_type="dataset")
             ckpt_files = [f for f in files if f.endswith(".pt") and "step_" in f]
             if ckpt_files:
                 # Get latest by step number - robust parsing
