@@ -377,8 +377,11 @@ class NNUELightningModule(pl.LightningModule):
                         model_for_ema = model_for_ema._orig_mod
                     model_for_ema.update_ema()
         
-        # Update training state
-        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps * max(1, self.trainer.world_size)
+        # Update training state - samples_seen is per-process count (not multiplied
+        # by world_size) because _update_data_position() estimates per-process file
+        # position from it. Multiplying by world_size would inflate the count and
+        # cause wrong file/position tracking on resume.
+        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps
         
         # Track approximate data position for resume (computed in main process)
         # Dataset position updates in worker processes don't propagate to main process,
@@ -555,6 +558,8 @@ class NNUELightningModule(pl.LightningModule):
         # Estimate which file and position within file
         # Correctly account for base_position: only the first (resume-start) file
         # has a non-zero base_position; subsequent files start at position 0.
+        base_file = getattr(self, '_resume_start_file', 0)
+        base_position = getattr(self, '_resume_start_position', 0)
         samples_remaining_in_first_file = ppf - base_position
         if samples_since_resume <= samples_remaining_in_first_file:
             # Still in the first (resume-start) file

@@ -136,9 +136,15 @@ def download_data(config: dict) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     
     sources = [DataSource(**s) for s in config.get("data", {}).get("sources", [])]
+    if not sources:
+        print("  ERROR: No data sources configured in config")
+        return 1
     files = download_training_data(data_dir, config, max_files=20)
     
     print(f"Downloaded {len(files)} files")
+    if not files:
+        print("  ERROR: No data files were downloaded - check HF token and repo configuration")
+        return 1
     total_gb = 0
     for f in files:
         size_gb = f.stat().st_size / 1024**3

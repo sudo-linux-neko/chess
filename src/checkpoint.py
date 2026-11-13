@@ -70,12 +70,14 @@ class CheckpointManager:
 
         self.keep_last_n = ckpt_cfg.get("keep_last_n", 5)
         self.keep_best_n = ckpt_cfg.get("keep_best_n", 3)
-        self.save_optimizer = ckpt_cfg.get("save_optimizer", True)
-        self.save_scheduler = ckpt_cfg.get("save_scheduler", True)
-        self.save_scaler = ckpt_cfg.get("save_scaler", True)
-        self.save_rng = ckpt_cfg.get("save_rng", True)
-        self.save_data_state = ckpt_cfg.get("save_data_state", True)
-        self.atomic_writes = ckpt_cfg.get("atomic_writes", True)
+        # Support both naming conventions for robustness: "include_*" (tests, CLI)
+        # and "save_*" (internal). "include_*" takes precedence if both are set.
+        self.save_optimizer = ckpt_cfg.get("include_optimizer", ckpt_cfg.get("save_optimizer", True))
+        self.save_scheduler = ckpt_cfg.get("include_scheduler", ckpt_cfg.get("save_scheduler", True))
+        self.save_scaler = ckpt_cfg.get("include_scaler", ckpt_cfg.get("save_scaler", True))
+        self.save_rng = ckpt_cfg.get("include_rng", ckpt_cfg.get("save_rng", True))
+        self.save_data_state = ckpt_cfg.get("include_data_position", ckpt_cfg.get("save_data_state", True))
+        self.atomic_writes = ckpt_cfg.get("include_atomic_write", ckpt_cfg.get("atomic_writes", ckpt_cfg.get("atomic_write", True)))
 
         self._lock = threading.Lock()
         self._metadata_cache: Dict[str, CheckpointMetadata] = {}
@@ -269,6 +271,10 @@ class CheckpointManager:
         import yaml
         config_str = yaml.dump(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]
+
+    def _compute_config_hash(self, config: Dict) -> str:
+        """Alias for _hash_config (backward compatibility)."""
+        return self._hash_config(config)
 
     def _rotate_checkpoints(self, is_best: bool = False):
         """Rotate checkpoints: keep last N + best N."""
