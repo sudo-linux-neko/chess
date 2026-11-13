@@ -25,7 +25,7 @@ if not hf_token:
     print("  Training will continue but checkpoints won't upload to HF.")
 
 print(f"Python: {sys.version}")
-print(f"CUDA available: {end := __import__('torch').cuda.is_available() if 'torch' in sys.modules else 'checking...'}")
+print(f"CUDA available: {__import__('torch').cuda.is_available() if 'torch' in sys.modules else 'checking...'}")
 
 # -----------------------------------------------------------
 # 1. Clone / update repo

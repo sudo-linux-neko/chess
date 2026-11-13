@@ -242,7 +242,8 @@ class HFUploader:
                 # Re-queue task for later retry instead of losing it permanently
                 # Mark as pending again so it can be retried when HF becomes available
                 task.status = UploadStatus.PENDING
-                self._queue.put((-task.priority, time.time(), task))
+                self._step_counter += 1
+                self._queue.put((-task.priority, self._step_counter, task))
                 self._queue.task_done()
                 # Brief sleep to avoid tight failure loop when HF is not ready
                 time.sleep(1.0)
