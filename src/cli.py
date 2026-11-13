@@ -703,9 +703,13 @@ def run_export_only(config: dict) -> int:
     nnue_path = exporter.export(model, calibration_data=test_data, use_ema=False)
 
     if config.get("export", {}).get("verify", True):
-        result = exporter.verify_export(model, nnue_path, test_data)
-        if not result["verified"]:
-            print("Export verification failed!")
+        try:
+            result = exporter.verify_export(model, nnue_path, test_data)
+            if not result["verified"]:
+                print("Export verification failed!")
+                return 1
+        except Exception as e:
+            print(f"Export verification error: {e}")
             return 1
 
     print(f"Exported to: {nnue_path}")
@@ -753,7 +757,11 @@ def run_verify_export(config: dict) -> int:
         test_data = torch.zeros(config.get("export", {}).get("verify_samples", 20000), config.get("model", {}).get("input_dim", 81920), dtype=torch.float32)
 
     exporter = create_exporter(config)
-    result = exporter.verify_export(model, nnue_path, test_data)
+    try:
+        result = exporter.verify_export(model, nnue_path, test_data)
+    except Exception as e:
+        print(f"Export verification error: {e}")
+        return 1
 
     return 0 if result["verified"] else 1
 
