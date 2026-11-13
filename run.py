@@ -443,6 +443,40 @@ def run_full_training(config, is_kaggle):
         trainer.fit(pl_module)
     except KeyboardInterrupt:
         print("\n  Interrupted by user")
+        # Save emergency checkpoint on Ctrl+C (signal handler may not always fire)
+        try:
+            if pl_module and checkpoint_manager:
+                print("  Saving emergency checkpoint...")
+                try:
+                    optimizers = pl_module.optimizers()
+                    opt = optimizers[0] if optimizers else None
+                except Exception:
+                    opt = None
+                try:
+                    scheds = pl_module.lr_schedulers()
+                    sched = scheds[0] if scheds else None
+                except Exception:
+                    sched = None
+                ckpt_path = checkpoint_manager.save_checkpoint(
+                    model=pl_module.model,
+                    optimizer=opt,
+                    scheduler=sched,
+                    scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
+                    training_state=pl_module.training_state,
+                    config=config,
+                    ema_model=pl_module.ema_model,
+                    is_best=False,
+                )
+                if ckpt_path and hf_uploader:
+                    try:
+                        hf_uploader.queue_upload(ckpt_path)
+                        meta_path = ckpt_path.with_suffix('.meta.json')
+                        if meta_path.exists():
+                            hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+                    except Exception as e:
+                        print(f"  Checkpoint upload failed: {e}")
+        except Exception as e2:
+            print(f"  Emergency checkpoint failed: {e2}")
     except Exception as e:
         print(f"\n  Training error: {e}")
         import traceback

@@ -1547,14 +1547,17 @@ def create_dataloader(
                     config=config,  # Pass config for curriculum settings
                 )
                 # Override file discovery to use streaming manager's active files
-                # active_files is a subset (currently downloaded files), so
-                # start_file/start_position from training state (which index into
-                # the full file list) don't apply. Reset to 0; position tracking
-                # via _update_data_position() will correctly estimate post-resume
-                # position from samples_seen.
+                # active_files is a subset (currently downloaded files). _update_data_position()
+                # computes indices relative to dataset.files (which is active_files in streaming
+                # mode), so start_file/start_position from training state ARE valid indices into
+                # active_files. Keep them from the constructor instead of resetting to 0,
+                # otherwise resume position is lost and training restarts from the beginning.
                 dataset.files = active_files
-                dataset.current_file_idx = 0
-                dataset.current_position = 0
+                # Clamp resume position to active file bounds (files may have been
+                # cleaned up between checkpoint and resume)
+                if dataset.current_file_idx >= len(active_files):
+                    dataset.current_file_idx = max(0, len(active_files) - 1)
+                    dataset.current_position = 0
                 print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
         else:
             # Non-streaming: check for existing data files first
