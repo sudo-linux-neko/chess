@@ -134,38 +134,50 @@ class StreamingBinpackDataset(IterableDataset):
         worker_seed = self.seed + worker_id * 10000
         rng = random.Random(worker_seed)
 
-        # Distribute files across workers
-        files_per_worker = max(1, len(self.files) // num_workers)
-        start_idx = worker_id * files_per_worker
-        end_idx = start_idx + files_per_worker if worker_id < num_workers - 1 else len(self.files)
-        worker_files = self.files[start_idx:end_idx]
+        # DDP sharding across ranks: each GPU trains on unique files.
+        # Without this, every rank processes identical data (wastes 50% of data
+        # on 2-GPU runs, hurts model quality). Stride sharding is deterministic
+        # and requires no communication: rank r gets files[r::world_size].
+        rank = int(os.environ.get("RANK", "0"))
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank_files = self.files[rank::world_size] if world_size > 1 else list(self.files)
 
-        # Handle resume - distribute remaining files across ALL workers
-        # (not just worker 0, which would leave other GPUs idle after resume)
-        # Resume state is consumed once: after first epoch, start fresh from
-        # beginning of all files (normal multi-epoch training)
-        if self.current_file_idx > 0 or self.current_position > 0:
-            if not self._resume_consumed:
-                remaining_files = self.files[self.current_file_idx:]
-                if len(remaining_files) > 0:
-                    rem_files_per_worker = max(1, len(remaining_files) // num_workers)
-                    rem_start_idx = worker_id * rem_files_per_worker
-                    rem_end_idx = rem_start_idx + rem_files_per_worker if worker_id < num_workers - 1 else len(remaining_files)
-                    worker_files = remaining_files[rem_start_idx:rem_end_idx]
-                    # Adjust start_idx so global_file_idx maps correctly to self.files indices
-                    start_idx = self.current_file_idx + rem_start_idx
-                else:
-                    worker_files = []
-                    start_idx = 0
-                # Mark resume as consumed so subsequent epochs start fresh
-                self._resume_consumed = True
-            else:
-                # Resume already consumed - start fresh from beginning
-                self.current_file_idx = 0
-                self.current_position = 0
+        # Map rank-local index -> global self.files index (for _iterate_* and position tracking)
+        def global_index(local_idx: int) -> int:
+            return rank + local_idx * world_size if world_size > 1 else local_idx
+
+        # Distribute this rank's files across workers
+        files_per_worker = max(1, len(rank_files) // num_workers)
+        start_idx = worker_id * files_per_worker
+        end_idx = start_idx + files_per_worker if worker_id < num_workers - 1 else len(rank_files)
+        worker_files = rank_files[start_idx:end_idx]
+        worker_start_idx = start_idx  # index into rank_files
+
+        # Handle resume: map global current_file_idx to rank-local index
+        resume_file = self.current_file_idx
+        resume_pos = self.current_position
+        _resume_consumed = getattr(self, '_resume_consumed', False)
+
+        if not _resume_consumed and (resume_file > 0 or resume_pos > 0):
+            # Does the resume file belong to this rank?
+            if world_size <= 1 or (resume_file - rank) % world_size == 0:
+                resume_local = (resume_file - rank) // world_size if world_size > 1 else resume_file
+                if 0 <= resume_local < len(rank_files):
+                    # Distribute remaining rank-local files from resume_local across workers
+                    remaining = rank_files[resume_local:]
+                    rem_per_worker = max(1, len(remaining) // num_workers)
+                    rem_start = worker_id * rem_per_worker
+                    rem_end = rem_start + rem_per_worker if worker_id < num_workers - 1 else len(remaining)
+                    worker_files = remaining[rem_start:rem_end]
+                    worker_start_idx = resume_local + rem_start
+            self._resume_consumed = True
+        else:
+            # Not resuming - reset position for fresh start
+            self.current_file_idx = 0
+            self.current_position = 0
 
         for file_idx, filepath in enumerate(worker_files):
-            global_file_idx = start_idx + file_idx
+            global_file_idx = global_index(worker_start_idx + file_idx)
 
             if CPP_LOADER_AVAILABLE:
                 yield from self._iterate_cpp_loader(filepath, global_file_idx, rng)
