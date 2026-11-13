@@ -95,7 +95,7 @@ class CheckpointManager:
     ) -> Optional[Path]:
         """Save complete training checkpoint atomically."""
         with self._lock:
-            step = getattr(training_state, 'step', 0)
+            step = int(getattr(training_state, 'step', 0))
             timestamp = datetime.utcnow().isoformat() + 'Z'
 
             # Prepare state dict
@@ -128,7 +128,13 @@ class CheckpointManager:
             if self.save_data_state and data_state is not None:
                 state["data_state"] = data_state
             if ema_model is not None:
-                state["ema_model"] = ema_model.state_dict()
+                ema_state = ema_model.state_dict()
+                # Strip _orig_mod. prefix for compatibility (in case ema_model is compiled)
+                clean_ema_state = {}
+                for k, v in ema_state.items():
+                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                    clean_ema_state[clean_key] = v
+                state["ema_model"] = clean_ema_state
 
             # Generate filename
             if is_best:
@@ -160,7 +166,7 @@ class CheckpointManager:
                     train_loss=_tl[-1] if _tl else 0,
                     val_loss=_vl[-1] if _vl else 0,
                     best_val_loss=getattr(training_state, 'best_val_loss', float('inf')),
-                    learning_rate=optimizer.param_groups[0]['lr'] if optimizer else 0,
+                    learning_rate=optimizer.param_groups[0]['lr'] if optimizer and len(optimizer.param_groups) > 0 else 0,
                     lambda_val=_lh[-1] if _lh else 0,
                     time_elapsed=getattr(training_state, 'time_elapsed', 0),
                     timestamp=timestamp,
@@ -192,12 +198,21 @@ class CheckpointManager:
     def _atomic_save(self, state: Dict, tmp_path: Path, final_path: Path):
         """Save to temp file, fsync, then atomic rename."""
         torch.save(state, tmp_path)
-        # Ensure data is on disk
-        with open(tmp_path, 'rb') as f:
-            f.flush()
-            os.fsync(f.fileno())
+        # Ensure data is durable on disk before rename
+        try:
+            with open(tmp_path, 'rb') as f:
+                os.fsync(f.fileno())
+        except Exception:
+            pass  # fsync best-effort; atomic rename still protects against corruption
         # Atomic rename
         tmp_path.rename(final_path)
+        # Fsync directory to ensure rename is durable
+        try:
+            dir_fd = os.open(str(self.checkpoint_dir), os.O_RDONLY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+        except Exception:
+            pass
 
     def _serialize_training_state(self, training_state: Any) -> Dict:
         """Serialize training state to dict."""
@@ -481,11 +496,16 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                     print(f"HF checkpoint download failed: {e}")
                     return None
                 if not local_path.exists():
-                    # Fallback: try constructing path manually
-                    local_path = Path(ckpt_dir) / latest
-                    if not local_path.exists():
-                        print(f"Downloaded checkpoint not found at {local_path}")
-                        return None
+                    # Fallback: hf_hub_download with local_dir stores at
+                    # local_dir/<repo_id>/<filename>, try that path too
+                    fallback_path = Path(ckpt_dir) / source_repo_id / latest if (source_repo_id := hf_cfg.get("repo_id", "")) else None
+                    if fallback_path and fallback_path.exists():
+                        local_path = fallback_path
+                    else:
+                        local_path = Path(ckpt_dir) / latest
+                        if not local_path.exists():
+                            print(f"Downloaded checkpoint not found at {local_path}")
+                            return None
                 return local_path
     except Exception as e:
         print(f"HF checkpoint download failed: {e}")

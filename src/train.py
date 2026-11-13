@@ -327,6 +327,12 @@ class NNUELightningModule(pl.LightningModule):
             return
         self._last_global_step = current_step
         
+        # Sync training_state.step with PL's global_step (source of truth)
+        # Previously we incremented separately which caused an off-by-one:
+        # _last_global_step started at -1, so on first call with global_step=0,
+        # training_state.step became 1 while global_step was 0.
+        self.training_state.step = current_step
+        
         # Update EMA
         if self.ema_model is not None:
             ema_cfg = self.config.get("advanced", {}).get("ema", {})
@@ -340,8 +346,7 @@ class NNUELightningModule(pl.LightningModule):
                     model_for_ema.update_ema()
         
         # Update training state
-        self.training_state.step += 1
-        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps
+        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps * max(1, self.trainer.world_size)
         
         # Track approximate data position for resume (computed in main process)
         # Dataset position updates in worker processes don't propagate to main process,
@@ -431,10 +436,20 @@ class NNUELightningModule(pl.LightningModule):
             # Update cumulative time_elapsed before saving
             self.training_state.time_elapsed = time.time() - self._global_start_time + self._resume_time_offset
             
+            # Get optimizer/scheduler with protection (may not be available before trainer.fit() completes setup)
+            try:
+                opt = self.optimizers()[0] if self.optimizers() else None
+            except Exception:
+                opt = None
+            try:
+                sched = self.lr_schedulers()[0] if self.lr_schedulers() else None
+            except Exception:
+                sched = None
+            
             ckpt_path = self.checkpoint_manager.save_checkpoint(
                 model=self.model,
-                optimizer=self.optimizers()[0] if self.optimizers() else None,
-                scheduler=self.lr_schedulers()[0] if self.lr_schedulers() else None,
+                optimizer=opt,
+                scheduler=sched,
                 scaler=self.trainer.scaler if hasattr(self.trainer, 'scaler') and self.trainer.scaler is not None else None,
                 training_state=self.training_state,
                 config=self.config,
@@ -667,7 +682,13 @@ class NNUELightningModule(pl.LightningModule):
         
         # Save EMA state
         if self.ema_model is not None:
-            checkpoint["ema_state_dict"] = self.ema_model.state_dict()
+            ema_state = self.ema_model.state_dict()
+            # Strip _orig_mod. prefix if EMA model is compiled
+            clean_ema_state = {}
+            for k, v in ema_state.items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                clean_ema_state[clean_key] = v
+            checkpoint["ema_state_dict"] = clean_ema_state
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         """Load custom state."""
@@ -894,13 +915,18 @@ class OverfittingCallback(Callback):
         optimizers = pl_module.optimizers()
         if optimizers is None:
             return
+        old_wd = 0.0
+        new_wd = 0.0
+        modified = False
         for opt in optimizers:
             for group in opt.param_groups:
                 old_wd = float(group.get('weight_decay', 0.0))
                 new_wd = old_wd * factor
                 group['weight_decay'] = new_wd
                 print(f"   Weight decay: {old_wd:.2e} → {new_wd:.2e}")
-        self.remediation_history.append(f"weight_decay_{old_wd:.2e}_to_{new_wd:.2e}")
+                modified = True
+        if modified:
+            self.remediation_history.append(f"weight_decay_{old_wd:.2e}_to_{new_wd:.2e}")
 
     def _add_dropout(self, pl_module, p: float = 0.1):
         """Add dropout to the model (escalating: 0.1 → 0.2 → 0.3)."""
@@ -920,13 +946,18 @@ class OverfittingCallback(Callback):
         optimizers = pl_module.optimizers()
         if optimizers is None:
             return
+        old_lr = 0.0
+        new_lr = 0.0
+        modified = False
         for opt in optimizers:
             for group in opt.param_groups:
                 old_lr = float(group['lr'])
                 new_lr = old_lr * factor
                 group['lr'] = new_lr
                 print(f"   Learning rate: {old_lr:.2e} → {new_lr:.2e}")
-        self.remediation_history.append(f"lr_reduced_{factor}x")
+                modified = True
+        if modified:
+            self.remediation_history.append(f"lr_reduced_{factor}x")
 
     def _increase_label_smoothing(self, pl_module, factor: float = 2.0):
         """Increase label smoothing on WDL loss."""

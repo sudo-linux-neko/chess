@@ -406,7 +406,7 @@ def run_full_training(config, is_kaggle):
                 training_state=pl_module.training_state,
                 config=config,
                 ema_model=pl_module.ema_model,
-                is_best=True,
+                is_best=False,  # Interrupted model may not be best; don't overwrite best.pt
             )
             if ckpt_path and hf_uploader:
                 hf_uploader.queue_upload(ckpt_path)
