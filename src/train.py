@@ -178,11 +178,23 @@ class NNUELightningModule(pl.LightningModule):
         self.lambda_cfg = train_cfg.get("lambda_schedule", {})
         # Default start_lambda to wdl_lambda from training config (not 1.0)
         # so the lambda schedule starts at the intended blending ratio.
-        self.start_lambda = float(self.lambda_cfg.get("start_lambda", train_cfg.get("wdl_lambda", 1.0)))
-        self.lambda_delta = float(self.lambda_cfg.get("delta", -0.3))
+        # Use explicit None check to handle start_lambda: null in YAML.
+        _start_lambda = self.lambda_cfg.get("start_lambda", train_cfg.get("wdl_lambda", 1.0))
+        if _start_lambda is None:
+            _start_lambda = train_cfg.get("wdl_lambda", 1.0)
+        self.start_lambda = float(_start_lambda)
+
+        _lambda_delta = self.lambda_cfg.get("delta", -0.3)
+        if _lambda_delta is None:
+            _lambda_delta = -0.3
+        self.lambda_delta = float(_lambda_delta)
+
         # end_lambda defaults to start_lambda + delta so the schedule
         # is continuous (no jump after total_steps)
-        self.end_lambda = float(self.lambda_cfg.get("end_lambda", self.start_lambda + self.lambda_delta))
+        _end_lambda = self.lambda_cfg.get("end_lambda", self.start_lambda + self.lambda_delta)
+        if _end_lambda is None:
+            _end_lambda = self.start_lambda + self.lambda_delta
+        self.end_lambda = float(_end_lambda)
         self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", 5052000))
         self.lambda_warmup_pct = float(self.lambda_cfg.get("warmup_pct", 0.25))
         self.lambda_jitter = self.lambda_cfg.get("jitter", {})
