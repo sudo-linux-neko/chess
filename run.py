@@ -377,18 +377,32 @@ def run_full_training(config, is_kaggle):
         
         print(f"\n  Received signal {signum}, saving checkpoint immediately...")
         try:
-            # Optimizer/scheduler may not be available before trainer.fit()
+            # Try PL's optimizers first (available after trainer.fit() starts).
+            # Fall back to configure_optimizers() if fit() hasn't started yet.
             try:
-                opt_cfg = pl_module.configure_optimizers()
-                opt = opt_cfg["optimizer"]
-                lr_sched_cfg = opt_cfg.get("lr_scheduler")
-                if isinstance(lr_sched_cfg, dict):
-                    sched = lr_sched_cfg["scheduler"]
-                else:
-                    sched = lr_sched_cfg
+                optimizers = pl_module.optimizers()
+                opt = optimizers[0] if optimizers else None
             except Exception:
                 opt = None
-                sched = None
+            if opt is None:
+                # fit() hasn't started yet - create optimizers manually for checkpoint
+                try:
+                    opt_cfg = pl_module.configure_optimizers()
+                    opt = opt_cfg["optimizer"]
+                    lr_sched_cfg = opt_cfg.get("lr_scheduler")
+                    if isinstance(lr_sched_cfg, dict):
+                        sched = lr_sched_cfg["scheduler"]
+                    else:
+                        sched = lr_sched_cfg
+                except Exception:
+                    opt = None
+                    sched = None
+            else:
+                try:
+                    scheds = pl_module.lr_schedulers()
+                    sched = scheds[0] if scheds else None
+                except Exception:
+                    sched = None
             ckpt_path = checkpoint_manager.save_checkpoint(
                 model=pl_module.model,
                 optimizer=opt,

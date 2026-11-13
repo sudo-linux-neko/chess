@@ -745,8 +745,10 @@ class StreamingDataManager:
             # but _discover_all_files uses data_dir/<filename>, so we symlink
             link_path = self.data_dir / filepath.name
             try:
-                if not link_path.exists():
-                    link_path.symlink_to(actual_path)
+                # Remove existing link/file if it's broken or wrong
+                if link_path.exists() or link_path.is_symlink():
+                    link_path.unlink(missing_ok=True)
+                link_path.symlink_to(actual_path)
             except Exception:
                 # Symlinks not supported, use actual path
                 link_path = actual_path

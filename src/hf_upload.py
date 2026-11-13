@@ -236,9 +236,10 @@ class HFUploader:
                 continue
 
             if not self._hf_available or not api or not repo_ready:
-                task.status = UploadStatus.FAILED
-                task.error = "huggingface_hub not available, no token, or repo not ready"
-                self._stats["failed"] += 1
+                # Re-queue task for later retry instead of losing it permanently
+                # Mark as pending again so it can be retried when HF becomes available
+                task.status = UploadStatus.PENDING
+                self._queue.put((-task.priority, time.time(), task))
                 self._queue.task_done()
                 # Brief sleep to avoid tight failure loop when HF is not ready
                 time.sleep(1.0)
