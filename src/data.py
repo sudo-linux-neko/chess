@@ -814,7 +814,10 @@ class StreamingDataManager:
             print(f"Low space: {free_gb:.1f}GB free, need {required}GB for {filepath.name}")
             
             # Try cleanup
-            if self._cleanup_old_files(required + 2):
+            self._cleanup_old_files(required + 2)
+            stat = shutil.disk_usage(self.data_dir)
+            free_gb = stat.free / 1024**3
+            if free_gb > required:
                 return True
             
             # Fallback: try with smaller target

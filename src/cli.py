@@ -550,7 +550,7 @@ def run_training(config: dict) -> int:
                     sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
-                checkpoint_manager.save_checkpoint(
+                ckpt_path = checkpoint_manager.save_checkpoint(
                     model=pl_module.model,
                     optimizer=opt,
                     scheduler=sched,
@@ -560,7 +560,16 @@ def run_training(config: dict) -> int:
                     ema_model=pl_module.ema_model,
                     is_best=False,
                 )
-                print("  Emergency checkpoint saved.")
+                if ckpt_path:
+                    print("  Emergency checkpoint saved.")
+                    if hf_uploader:
+                        try:
+                            hf_uploader.queue_upload(ckpt_path)
+                            meta_path = ckpt_path.with_suffix('.meta.json')
+                            if meta_path.exists():
+                                hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+                        except Exception as e:
+                            print(f"  Checkpoint upload failed: {e}")
         except Exception as e2:
             print(f"  Emergency checkpoint failed: {e2}")
         if hf_uploader:
@@ -592,7 +601,7 @@ def run_training(config: dict) -> int:
                     sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
-                checkpoint_manager.save_checkpoint(
+                ckpt_path = checkpoint_manager.save_checkpoint(
                     model=pl_module.model,
                     optimizer=opt,
                     scheduler=sched,
@@ -602,7 +611,16 @@ def run_training(config: dict) -> int:
                     ema_model=pl_module.ema_model,
                     is_best=False,
                 )
-                print("  Emergency checkpoint saved.")
+                if ckpt_path:
+                    print("  Emergency checkpoint saved.")
+                    if hf_uploader:
+                        try:
+                            hf_uploader.queue_upload(ckpt_path)
+                            meta_path = ckpt_path.with_suffix('.meta.json')
+                            if meta_path.exists():
+                                hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+                        except Exception as e:
+                            print(f"  Checkpoint upload failed: {e}")
         except Exception as e2:
             print(f"  Emergency checkpoint failed: {e2}")
         if hf_uploader:
