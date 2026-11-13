@@ -310,7 +310,7 @@ class NNUEExporter:
         original_model.eval()
         original_model = original_model.to(test_data.device)
         with torch.no_grad():
-            original_preds = original_model(test_data).cpu().numpy().squeeze()
+            original_preds = original_model(test_data).cpu().numpy().squeeze(-1)
             
             # Use Rust-accelerated verification if available
             if self._rust_available:

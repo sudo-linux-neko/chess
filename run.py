@@ -326,30 +326,21 @@ def run_full_training(config, is_kaggle):
     if resume_ckpt:
         try:
             print(f"  Resuming from: {resume_ckpt}")
-            # Optimizer/scheduler must be configured BEFORE load_checkpoint so their
-            # state can be restored. PL's optimizers()/lr_schedulers() return empty
-            # before trainer.fit(), so we call configure_optimizers() manually.
-            try:
-                opt_cfg = pl_module.configure_optimizers()
-                opt = opt_cfg["optimizer"]
-                lr_sched_cfg = opt_cfg.get("lr_scheduler")
-                if isinstance(lr_sched_cfg, dict):
-                    sched = lr_sched_cfg["scheduler"]
-                else:
-                    sched = lr_sched_cfg
-            except Exception as e:
-                print(f"  WARNING: Could not configure optimizers for resume: {e}")
-                opt = None
-                sched = None
-            checkpoint_manager.load_checkpoint(
+            # Load model + training state from checkpoint. Do NOT pass manually-created
+            # optimizers/schedulers because PL creates new ones in configure_optimizers()
+            # during trainer.fit() — state loaded into our manual objects would be lost.
+            # Instead, capture state dicts here and restore them in on_train_start().
+            checkpoint_result = checkpoint_manager.load_checkpoint(
                 resume_ckpt,
                 model=pl_module.model,
-                optimizer=opt,
-                scheduler=sched,
                 scaler=None,
                 training_state=pl_module.training_state,
                 ema_model=pl_module.ema_model,
             )
+            # Store optimizer/scheduler state for restoration in on_train_start()
+            # (PL creates its own optimizers during fit(), so we restore state into them there)
+            pl_module._optimizer_state = checkpoint_result.get("optimizer_state", {})
+            pl_module._scheduler_state = checkpoint_result.get("scheduler_state", {})
             # Restore _resume_time_offset so time budget accounts for previously elapsed time
             # (PL's on_load_checkpoint is not called since we load manually before trainer.fit())
             pl_module._resume_time_offset = pl_module.training_state.time_elapsed

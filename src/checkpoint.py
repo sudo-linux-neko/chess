@@ -377,6 +377,8 @@ class CheckpointManager:
             "data_state": checkpoint.get("data_state", {}),
             "config": checkpoint.get("config", {}),
             "step": checkpoint.get("step", 0),
+            "optimizer_state": checkpoint.get("optimizer", {}),
+            "scheduler_state": checkpoint.get("scheduler", {}),
         }
 
         if training_state is not None and "training_state" in checkpoint:

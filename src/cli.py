@@ -294,11 +294,13 @@ def run_smoke_test(config: dict) -> int:
     print("\n5. Testing checkpoint save/load...")
     # Optimizer/scheduler may not be available before trainer.fit()
     try:
-        opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+        optimizers = pl_module.optimizers()
+        opt = optimizers[0] if optimizers else None
     except Exception:
         opt = None
     try:
-        sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+        scheds = pl_module.lr_schedulers()
+        sched = scheds[0] if scheds else None
     except Exception:
         sched = None
     ckpt_path = checkpoint_manager.save_checkpoint(
@@ -314,7 +316,6 @@ def run_smoke_test(config: dict) -> int:
         if hf_uploader:
             try:
                 hf_uploader.queue_upload(ckpt_path)
-                time.sleep(0.5)
             except Exception as e:
                 print(f"  Upload warning: {e}")
         hf_uploader.shutdown(wait=True) if hf_uploader else None
@@ -417,31 +418,21 @@ def run_training(config: dict) -> int:
 
     if resume_ckpt:
         print(f"Resuming from: {resume_ckpt}")
-        # Load checkpoint into pl_module.model (not a separate model variable)
-        # Optimizer/scheduler must be configured BEFORE load_checkpoint so their
-        # state can be restored. PL's optimizers()/lr_schedulers() return empty
-        # before trainer.fit(), so we call configure_optimizers() manually.
-        try:
-            opt_cfg = pl_module.configure_optimizers()
-            opt = opt_cfg["optimizer"]
-            lr_sched_cfg = opt_cfg.get("lr_scheduler")
-            if isinstance(lr_sched_cfg, dict):
-                sched = lr_sched_cfg["scheduler"]
-            else:
-                sched = lr_sched_cfg
-        except Exception as e:
-            print(f"  WARNING: Could not configure optimizers for resume: {e}")
-            opt = None
-            sched = None
-        checkpoint_manager.load_checkpoint(
+        # Load model + training state from checkpoint. Do NOT pass manually-created
+        # optimizers/schedulers because PL creates new ones in configure_optimizers()
+        # during trainer.fit() — state loaded into our manual objects would be lost.
+        # Instead, capture state dicts here and restore them in on_train_start().
+        checkpoint_result = checkpoint_manager.load_checkpoint(
             resume_ckpt,
             model=pl_module.model,
-            optimizer=opt,
-            scheduler=sched,
-            scaler=None,  # Scaler restored by PL automatically
+            scaler=None,
             training_state=pl_module.training_state,
             ema_model=pl_module.ema_model,
         )
+        # Store optimizer/scheduler state for restoration in on_train_start()
+        # (PL creates its own optimizers during fit(), so we restore state into them there)
+        pl_module._optimizer_state = checkpoint_result.get("optimizer_state", {})
+        pl_module._scheduler_state = checkpoint_result.get("scheduler_state", {})
         # Restore _resume_time_offset so time budget accounts for previously elapsed time
         # (PL's on_load_checkpoint is not called since we load manually before trainer.fit())
         pl_module._resume_time_offset = pl_module.training_state.time_elapsed
@@ -485,11 +476,13 @@ def run_training(config: dict) -> int:
             if pl_module and checkpoint_manager:
                 print("  Saving emergency checkpoint...")
                 try:
-                    opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+                    optimizers = pl_module.optimizers()
+                    opt = optimizers[0] if optimizers else None
                 except Exception:
                     opt = None
                 try:
-                    sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+                    scheds = pl_module.lr_schedulers()
+                    sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
                 checkpoint_manager.save_checkpoint(
@@ -525,11 +518,13 @@ def run_training(config: dict) -> int:
     print("\n6. Saving final checkpoint...")
     # Optimizer/scheduler should be available after trainer.fit()
     try:
-        opt = pl_module.optimizers()[0] if pl_module.optimizers() else None
+        optimizers = pl_module.optimizers()
+        opt = optimizers[0] if optimizers else None
     except Exception:
         opt = None
     try:
-        sched = pl_module.lr_schedulers()[0] if pl_module.lr_schedulers() else None
+        scheds = pl_module.lr_schedulers()
+        sched = scheds[0] if scheds else None
     except Exception:
         sched = None
     ckpt_path = checkpoint_manager.save_checkpoint(
@@ -549,6 +544,13 @@ def run_training(config: dict) -> int:
         meta_path = ckpt_path.with_suffix('.meta.json')
         if meta_path.exists():
             hf_uploader.queue_upload(meta_path, remote_path=f"checkpoints/{meta_path.name}", priority=5)
+
+    # Ensure background uploads complete before exit
+    if hf_uploader:
+        try:
+            hf_uploader.shutdown(wait=True)
+        except Exception:
+            pass
 
     # Report learning status
     print("\n" + "=" * 60)

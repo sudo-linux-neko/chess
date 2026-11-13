@@ -258,6 +258,29 @@ class NNUELightningModule(pl.LightningModule):
         """Called at start of training."""
         self._epoch_start_time = time.time()
         self._step_start_time = time.time()
+        
+        # Restore optimizer/scheduler state from checkpoint.
+        # PL creates new optimizers in configure_optimizers() during fit(),
+        # so manually-loaded state (before fit) is lost. We store state dicts
+        # on the module before fit() and restore them here, after PL has
+        # created its own optimizers but before the training loop starts.
+        if getattr(self, '_optimizer_state', None):
+            try:
+                optimizers = self.optimizers()
+                if optimizers and len(optimizers) > 0:
+                    optimizers[0].load_state_dict(self._optimizer_state)
+                    print("  Optimizer state restored from checkpoint")
+            except Exception as e:
+                print(f"  Warning: Could not restore optimizer state: {e}")
+        
+        if getattr(self, '_scheduler_state', None):
+            try:
+                scheds = self.lr_schedulers()
+                if scheds and len(scheds) > 0:
+                    scheds[0].load_state_dict(self._scheduler_state)
+                    print("  Scheduler state restored from checkpoint")
+            except Exception as e:
+                print(f"  Warning: Could not restore scheduler state: {e}")
 
     def on_train_batch_start(self, batch: Any, batch_idx: int):
         """Track step timing."""
@@ -567,13 +590,23 @@ class NNUELightningModule(pl.LightningModule):
 
     def train_dataloader(self):
         """Return training dataloader."""
+        # Capture resume position before creating dataset, then reset it
+        # so subsequent epochs start fresh (normal multi-epoch training).
+        # Without this, _update_data_position() estimates position from
+        # samples_seen (which includes pre-resume samples), causing epoch 2+
+        # to skip already-processed files.
+        start_file = self.training_state.current_file_idx
+        start_position = self.training_state.current_position
         loader = create_dataloader(
             self.config,
             streaming_manager=self.streaming_manager,
             is_train=True,
-            start_file=self.training_state.current_file_idx,
-            start_position=self.training_state.current_position,
+            start_file=start_file,
+            start_position=start_position,
         )
+        # Reset resume position after first use
+        self.training_state.current_file_idx = 0
+        self.training_state.current_position = 0
         # Store dataset reference so we can read its position during checkpoint saves
         self.train_dataset = loader.dataset
         return loader

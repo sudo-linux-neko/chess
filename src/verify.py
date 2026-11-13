@@ -138,7 +138,20 @@ class ExportVerifier:
                     scale=layers[name]["scale"],
                 ) for name in layers
             }
-            rust_nnue = self.RustQuantizedNNUE(qlayers)
+            rust_nnue = self.RustQuantizedNNUE(
+                ft_weight=qlayers["feature_transformer"].weight,
+                ft_bias=qlayers["feature_transformer"].bias,
+                ft_scale=qlayers["feature_transformer"].scale,
+                h1_weight=qlayers["hidden1"].weight,
+                h1_bias=qlayers["hidden1"].bias,
+                h1_scale=qlayers["hidden1"].scale,
+                h2_weight=qlayers["hidden2"].weight,
+                h2_bias=qlayers["hidden2"].bias,
+                h2_scale=qlayers["hidden2"].scale,
+                out_weight=qlayers["output"].weight,
+                out_bias=qlayers["output"].bias,
+                out_scale=qlayers["output"].scale,
+            )
         
         # Forward pass
         result = rust_nnue.forward(test_np)
