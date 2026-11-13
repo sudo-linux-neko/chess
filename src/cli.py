@@ -279,8 +279,18 @@ def run_smoke_test(config: dict) -> int:
 
     print("\n3. Initializing training components...")
     checkpoint_manager = CheckpointManager(config)
-    hf_uploader = create_uploader(config)
-    hf_uploader.start()  # Start background upload thread
+    hf_uploader = None
+    hf_token = os.environ.get("HF_TOKEN", "")
+    try:
+        hf_uploader = create_uploader(config)
+        if hf_token:
+            print(f"  HF_TOKEN: configured ({len(hf_token)} chars) - uploads enabled")
+            hf_uploader.start()
+        else:
+            print("  HF_TOKEN: NOT SET - uploads disabled")
+    except Exception as e:
+        print(f"  WARNING: HF uploader setup failed: {e} - continuing without uploads")
+        hf_uploader = None
     streaming_manager = None  # Not used in smoke test
 
     model = create_model(config)
@@ -430,11 +440,29 @@ def run_training(config: dict) -> int:
 
     print("\n3. Initializing components...")
     checkpoint_manager = CheckpointManager(config)
-    hf_uploader = create_uploader(config)
-    hf_uploader.start()  # Start background upload thread
+    hf_uploader = None
+    hf_token = os.environ.get("HF_TOKEN", "")
+    try:
+        hf_uploader = create_uploader(config)
+        if hf_token:
+            print(f"  HF_TOKEN: configured ({len(hf_token)} chars) - uploads enabled")
+            hf_uploader.start()
+        else:
+            print("  HF_TOKEN: NOT SET - uploads disabled (training continues without HF)")
+            print("   Add HF_TOKEN to Kaggle Secrets for checkpoint uploads")
+            # hf_uploader is FakeHFUploader, no need to start
+    except Exception as e:
+        print(f"  WARNING: HF uploader setup failed: {e} - continuing without uploads")
+        hf_uploader = None
 
     print("\n4. Checking for resumable checkpoint...")
-    resume_ckpt = find_resumable_checkpoint(config, hf_uploader)
+    resume_ckpt = None
+    try:
+        resume_ckpt = find_resumable_checkpoint(config, hf_uploader)
+        if resume_ckpt:
+            print(f"  Found resumable checkpoint: {resume_ckpt}")
+    except Exception as e:
+        print(f"  WARNING: Checkpoint resume check failed: {e} - starting fresh")
 
     model = create_model(config)
     print(f"Model parameters: {model.get_num_parameters():,}")
@@ -740,7 +768,8 @@ def run_training(config: dict) -> int:
             print(f"Verification error: {e}")
 
     if nnue_path:
-        hf_uploader.queue_export(nnue_path)
+        if hf_uploader:
+            hf_uploader.queue_export(nnue_path)
     if hf_uploader:
         hf_uploader.shutdown(wait=True)
 
