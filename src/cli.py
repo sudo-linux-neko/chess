@@ -291,7 +291,20 @@ def run_smoke_test(config: dict) -> int:
 
     print("\n4. Running training...")
     start = time.time()
-    trainer.fit(pl_module)
+    fit_ok = False
+    try:
+        trainer.fit(pl_module)
+        fit_ok = True
+    except Exception as e:
+        print(f"  Training error: {e}")
+    finally:
+        if hf_uploader:
+            try:
+                hf_uploader.shutdown(wait=True)
+            except Exception:
+                pass
+    if not fit_ok:
+        return 1
     elapsed = time.time() - start
     print(f"Training completed in {elapsed:.1f}s")
 
@@ -322,7 +335,7 @@ def run_smoke_test(config: dict) -> int:
                 hf_uploader.queue_upload(ckpt_path)
             except Exception as e:
                 print(f"  Upload warning: {e}")
-    
+
     if hf_uploader:
         hf_uploader.shutdown(wait=True)
 
@@ -522,6 +535,44 @@ def run_training(config: dict) -> int:
         trainer.fit(pl_module)
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        # Save emergency checkpoint on Ctrl+C
+        try:
+            if pl_module and checkpoint_manager:
+                print("  Saving emergency checkpoint...")
+                try:
+                    optimizers = pl_module.optimizers()
+                    opt = optimizers[0] if optimizers else None
+                except Exception:
+                    opt = None
+                try:
+                    scheds = pl_module.lr_schedulers()
+                    sched = scheds[0] if scheds else None
+                except Exception:
+                    sched = None
+                checkpoint_manager.save_checkpoint(
+                    model=pl_module.model,
+                    optimizer=opt,
+                    scheduler=sched,
+                    scaler=trainer.scaler if hasattr(trainer, 'scaler') and trainer.scaler is not None else None,
+                    training_state=pl_module.training_state,
+                    config=config,
+                    ema_model=pl_module.ema_model,
+                    is_best=False,
+                )
+                print("  Emergency checkpoint saved.")
+        except Exception as e2:
+            print(f"  Emergency checkpoint failed: {e2}")
+        if hf_uploader:
+            try:
+                hf_uploader.shutdown(wait=True)
+            except Exception:
+                pass
+        if streaming_manager:
+            try:
+                streaming_manager.shutdown()
+            except Exception:
+                pass
+        return 1
     except Exception as e:
         print(f"\nTraining error: {e}")
         import traceback

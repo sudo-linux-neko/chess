@@ -35,38 +35,55 @@ REPO_DIR = Path("/kaggle/working/chess-nnue")
 
 if not REPO_DIR.exists():
     print("\n[1/8] Cloning repository...")
-    result = subprocess.run(
-        ["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)],
-        capture_output=True, text=True, timeout=300
-    )
-    if result.returncode != 0:
-        print(f"  Clone failed: {result.stderr}")
-        print("  Trying full clone...")
+    try:
         result = subprocess.run(
-            ["git", "clone", REPO_URL, str(REPO_DIR)],
-            capture_output=True, text=True, timeout=600
+            ["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)],
+            capture_output=True, text=True, timeout=300
         )
+    except subprocess.TimeoutExpired:
+        print("  Clone timed out (300s), trying full clone...")
+        result = None
+    if result is None or result.returncode != 0:
+        print("  Trying full clone...")
+        try:
+            result = subprocess.run(
+                ["git", "clone", REPO_URL, str(REPO_DIR)],
+                capture_output=True, text=True, timeout=600
+            )
+        except subprocess.TimeoutExpired:
+            print("  FATAL: Clone timed out (600s)")
+            sys.exit(1)
         if result.returncode != 0:
             print(f"  FATAL: Clone failed: {result.stderr}")
             sys.exit(1)
 else:
     print("\n[1/8] Repository exists, pulling latest...")
-    result = subprocess.run(
-        ["git", "-C", str(REPO_DIR), "pull", "--ff-only"],
-        capture_output=True, text=True, timeout=120
-    )
-    if result.returncode != 0:
-        print(f"  Pull failed (may be local changes): {result.stderr}")
+    try:
         result = subprocess.run(
-            ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", "master"],
+            ["git", "-C", str(REPO_DIR), "pull", "--ff-only"],
             capture_output=True, text=True, timeout=120
         )
-        result2 = subprocess.run(
-            ["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/master"],
-            capture_output=True, text=True, timeout=60
-        )
-        if result2.returncode != 0:
-            print(f"  WARNING: git reset failed: {result2.stderr}")
+    except subprocess.TimeoutExpired:
+        print("  Pull timed out, trying fetch + reset...")
+        result = None
+    if result is None or result.returncode != 0:
+        print(f"  Pull failed (may be local changes): {getattr(result, 'stderr', '')}")
+        try:
+            subprocess.run(
+                ["git", "-C", str(REPO_DIR), "fetch", "--depth", "1", "origin", "master"],
+                capture_output=True, text=True, timeout=120
+            )
+        except subprocess.TimeoutExpired:
+            print("  Fetch timed out, continuing anyway...")
+        try:
+            result2 = subprocess.run(
+                ["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/master"],
+                capture_output=True, text=True, timeout=60
+            )
+            if result2.returncode != 0:
+                print(f"  WARNING: git reset failed: {result2.stderr}")
+        except subprocess.TimeoutExpired:
+            print("  Reset timed out, continuing anyway...")
 
 print(f"  Repo at: {REPO_DIR}")
 os.chdir(REPO_DIR)
@@ -95,7 +112,11 @@ else:
 
 for cmd in install_cmds:
     print(f"  Running: {' '.join(cmd[:4])}...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        print(f"  WARNING: Install timed out (600s), continuing...")
+        continue
     if result.returncode != 0:
         print(f"  WARNING: Install step had issues: {result.stderr[-500:]}")
         # Don't fail — continue, may still work
@@ -108,15 +129,20 @@ if (REPO_DIR / "src/build_cpp_loader.py").exists():
     cpp_cmd = [sys.executable, "src/build_cpp_loader.py"]
 else:
     cpp_cmd = [sys.executable, "-c", "from src.data import compile_cpp_loader; print(compile_cpp_loader())"]
-cpp_result = subprocess.run(
-    cpp_cmd,
-    capture_output=True, text=True, timeout=300,
-    cwd=REPO_DIR
-)
-if cpp_result.returncode == 0:
+try:
+    cpp_result = subprocess.run(
+        cpp_cmd,
+        capture_output=True, text=True, timeout=300,
+        cwd=REPO_DIR
+    )
+except subprocess.TimeoutExpired:
+    print("  C++ compilation timed out (non-fatal): exceeded 300s")
+    print("  Will use Python fallback (works, slightly slower).")
+    cpp_result = None
+if cpp_result is not None and cpp_result.returncode == 0:
     print("  C++ loader ready (fast path).")
 else:
-    print(f"  C++ compilation failed (non-fatal): {cpp_result.stderr[-300:]}")
+    print(f"  C++ compilation failed (non-fatal): {getattr(cpp_result, 'stderr', 'timed out')[-300:]}")
     print("  Will use Python fallback (works, slightly slower).")
 
 # -----------------------------------------------------------
