@@ -1569,13 +1569,9 @@ def create_dataloader(
         persistent_workers=hw_cfg.get("persistent_workers", True) and hw_cfg.get("num_workers", 16) > 0,
         pin_memory=hw_cfg.get("pin_memory", True),
         drop_last=is_train and data_cfg.get("drop_last_batch", True),
-        worker_init_fn=_worker_init_fn,
+        worker_init_fn=lambda wid: (
+            np.random.seed(torch.initial_seed() % 2**32),
+            random.seed(torch.initial_seed() % 2**32),
+        ),
         multiprocessing_context=mp.get_context('spawn') if hasattr(mp, 'get_context') else None,
     )
-
-
-def _worker_init_fn(worker_id: int):
-    import numpy as np
-    seed = torch.initial_seed() % 2**32
-    np.random.seed(seed)
-    random.seed(seed)

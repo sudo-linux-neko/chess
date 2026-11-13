@@ -396,10 +396,10 @@ class NNUELightningModule(pl.LightningModule):
         # position from it. Multiplying by world_size would inflate the count and
         # cause wrong file/position tracking on resume.
         #
-        # NOTE: on_train_batch_end is called every batch (not every optimizer step),
-        # so we add micro_batch_size (not micro_batch_size * accum_steps). The
-        # previous multiplication caused 8x overcounting and wrong resume position.
-        self.training_state.samples_seen += self.micro_batch_size
+        # NOTE: on_train_batch_end only runs on optimizer step boundaries
+        # (guard: current_step != _last_global_step), so each call represents
+        # accum_steps batches × micro_batch_size samples = micro_batch_size * accum_steps.
+        self.training_state.samples_seen += self.micro_batch_size * self.accum_steps
         
         # Track approximate data position for resume (computed in main process)
         # Dataset position updates in worker processes don't propagate to main process,
