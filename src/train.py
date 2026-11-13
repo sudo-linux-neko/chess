@@ -176,7 +176,9 @@ class NNUELightningModule(pl.LightningModule):
         
         # Lambda schedule (WDL/eval blending)
         self.lambda_cfg = train_cfg.get("lambda_schedule", {})
-        self.start_lambda = float(self.lambda_cfg.get("start_lambda", 1.0))
+        # Default start_lambda to wdl_lambda from training config (not 1.0)
+        # so the lambda schedule starts at the intended blending ratio.
+        self.start_lambda = float(self.lambda_cfg.get("start_lambda", train_cfg.get("wdl_lambda", 1.0)))
         self.lambda_delta = float(self.lambda_cfg.get("delta", -0.3))
         # end_lambda defaults to start_lambda + delta so the schedule
         # is continuous (no jump after total_steps)
