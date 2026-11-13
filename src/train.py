@@ -553,14 +553,22 @@ class NNUELightningModule(pl.LightningModule):
             samples_since_resume = 0
         
         # Estimate which file and position within file
-        files_completed = int(samples_since_resume // ppf)
-        position_in_file = int(samples_since_resume % ppf)
+        # Correctly account for base_position: only the first (resume-start) file
+        # has a non-zero base_position; subsequent files start at position 0.
+        samples_remaining_in_first_file = ppf - base_position
+        if samples_since_resume <= samples_remaining_in_first_file:
+            # Still in the first (resume-start) file
+            files_completed = 0
+            position_in_file = base_position + samples_since_resume
+        else:
+            # Moved past the first file
+            remaining = samples_since_resume - samples_remaining_in_first_file
+            files_completed = 1 + (remaining // ppf)
+            position_in_file = remaining % ppf
         
-        # Offset by the resume start file/position
-        base_file = getattr(self, '_resume_start_file', 0)
-        base_position = getattr(self, '_resume_start_position', 0)
+        # Offset by the resume start file
         self.training_state.current_file_idx = min(base_file + files_completed, num_files - 1)
-        self.training_state.current_position = min(base_position + position_in_file, ppf - 1)
+        self.training_state.current_position = min(position_in_file, ppf - 1)
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step using EMA model."""

@@ -636,16 +636,27 @@ class StreamingDataManager:
                 binpack_files = binpack_files[:source.max_files]
                 
                 for filename in binpack_files:
-                    filepath = self.data_dir / filename
-                    # Also check actual HF download path if symlink not available
-                    # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
+                    # Always use data_dir/filename as the canonical tracking path
+                    # (the symlink path that create_dataloader expects).
+                    # actual_path is where hf_hub_download actually stores the file.
+                    link_path = self.data_dir / filename
                     actual_path = self.data_dir / source.repo_id / filename
-                    if not filepath.exists() and actual_path.exists():
-                        filepath = actual_path
-                    self._all_files.append(filepath)
-                    if filepath.exists():
-                        self._downloaded_files.add(filepath)
-                        self._active_files.append(filepath)
+                    
+                    # If symlink already exists - mark as downloaded/active
+                    if link_path.exists() or link_path.is_symlink():
+                        self._all_files.append(link_path)
+                        self._downloaded_files.add(link_path)
+                        self._active_files.append(link_path)
+                        if not hasattr(self, '_actual_paths'):
+                            self._actual_paths = {}
+                        self._actual_paths[str(link_path)] = actual_path if actual_path.exists() else link_path
+                    # If actual file exists but no symlink yet - will be fixed on
+                    # first _download_file call. Track as all_files but not yet downloaded.
+                    elif actual_path.exists():
+                        self._all_files.append(link_path)
+                    # File not yet downloaded
+                    else:
+                        self._all_files.append(link_path)
                 
                 print(f"  {source.repo_id}: {len(binpack_files)} files available")
             except Exception as e:
