@@ -1035,6 +1035,9 @@ class OverfittingCallback(Callback):
     def _add_dropout(self, pl_module, p: float = 0.1):
         """Add dropout to the model (escalating: 0.1 → 0.2 → 0.3)."""
         model = pl_module.model
+        # Unwrap compiled model if needed (torch.compile wraps in _orig_mod)
+        if hasattr(model, '_orig_mod'):
+            model = model._orig_mod
         if hasattr(model, 'set_dropout'):
             # Escalate dropout on each attempt
             old_p = float(getattr(model, 'dropout_p', 0.0))
@@ -1046,18 +1049,37 @@ class OverfittingCallback(Callback):
             print("   WARNING: Model doesn't support dynamic dropout")
 
     def _reduce_learning_rate(self, pl_module, factor: float = 0.5):
-        """Reduce learning rate."""
+        """Reduce learning rate.
+        
+        Also updates OneCycleLR scheduler's max_lrs so the reduction
+        isn't overridden on the next optimizer step.
+        """
         optimizers = pl_module.optimizers()
         if optimizers is None:
             return
         old_lr = 0.0
         new_lr = 0.0
         modified = False
+        # Capture schedulers once (avoid repeated PL calls inside loop)
+        try:
+            scheds = pl_module.lr_schedulers()
+            scheduler = scheds[0] if scheds else None
+            if isinstance(scheduler, dict):
+                scheduler = scheduler.get("scheduler")
+        except Exception:
+            scheduler = None
         for opt in optimizers:
-            for group in opt.param_groups:
+            for i, group in enumerate(opt.param_groups):
                 old_lr = float(group['lr'])
                 new_lr = old_lr * factor
                 group['lr'] = new_lr
+                # Also update OneCycleLR max_lrs so reduction sticks
+                if scheduler is not None and hasattr(scheduler, 'max_lrs'):
+                    try:
+                        if i < len(scheduler.max_lrs):
+                            scheduler.max_lrs[i] = new_lr
+                    except Exception:
+                        pass
                 print(f"   Learning rate: {old_lr:.2e} → {new_lr:.2e}")
                 modified = True
         if modified:
