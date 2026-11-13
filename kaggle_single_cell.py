@@ -347,7 +347,7 @@ print(f"Repo: {REPO_DIR}")
 print(f"Checkpoints: {config.get('checkpoint', {}).get('dir', '/kaggle/working/checkpoints')}")
 print(f"Exports: {config.get('export', {}).get('dir', '/kaggle/working/exports')}")
 if hf_token:
-    print(f"HF Repo: auto-generated as {{username}}/chess-nnue")
+    print(f"HF Repo: auto-generated as <username>/chess-nnue")
 print("=" * 60)
 
 sys.exit(exit_code)
