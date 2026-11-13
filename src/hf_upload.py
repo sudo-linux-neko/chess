@@ -257,6 +257,7 @@ class HFUploader:
                     continue
                 # Mark as pending again so it can be retried when HF becomes available
                 task.status = UploadStatus.PENDING
+                task.retries += 1  # Count this re-queue as a retry attempt
                 with self._lock:
                     self._step_counter += 1
                     counter = self._step_counter
