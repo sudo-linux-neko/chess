@@ -181,27 +181,27 @@ class ExportVerifier:
         
         # Feature transformer
         x_flat = x.reshape(-1, features_per_bucket)
-        acc = x_flat @ ft["weight"].T.astype(np.float32) + ft["bias"].astype(np.float32)
-        acc = acc * ft["scale"]
+        acc = x_flat @ ft["weight"].T.astype(np.float32) * ft["scale"]
+        acc += ft["bias"].astype(np.float32)
         x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
         
         # Hidden1
         h1 = layers["hidden1"]
-        acc = x @ h1["weight"].T.astype(np.float32) + h1["bias"].astype(np.float32)
-        acc = acc * h1["scale"]
+        acc = x @ h1["weight"].T.astype(np.float32) * h1["scale"]
+        acc += h1["bias"].astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
         # Hidden2
         h2 = layers["hidden2"]
-        acc = x @ h2["weight"].T.astype(np.float32) + h2["bias"].astype(np.float32)
-        acc = acc * h2["scale"]
+        acc = x @ h2["weight"].T.astype(np.float32) * h2["scale"]
+        acc += h2["bias"].astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
         # Output
         out = layers["output"]
-        acc = x @ out["weight"].T.astype(np.float32) + out["bias"].astype(np.float32)
-        acc = acc * out["scale"]
+        acc = x @ out["weight"].T.astype(np.float32) * out["scale"]
+        acc += out["bias"].astype(np.float32)
         
         return acc.squeeze(-1)
 
@@ -430,27 +430,27 @@ class ExportVerifier:
         
         # Feature transformer
         x_flat = x.reshape(-1, features_per_bucket)
-        acc = x_flat @ ft["weight"].T.astype(np.float32) + ft["bias"].astype(np.float32)
-        acc = acc * ft["scale"]
+        acc = x_flat @ ft["weight"].T.astype(np.float32) * ft["scale"]
+        acc += ft["bias"].astype(np.float32)
         x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
         
         # Hidden1
         h1 = layers["hidden1"]
-        acc = x @ h1["weight"].T.astype(np.float32) + h1["bias"].astype(np.float32)
-        acc = acc * h1["scale"]
+        acc = x @ h1["weight"].T.astype(np.float32) * h1["scale"]
+        acc += h1["bias"].astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
         # Hidden2
         h2 = layers["hidden2"]
-        acc = x @ h2["weight"].T.astype(np.float32) + h2["bias"].astype(np.float32)
-        acc = acc * h2["scale"]
+        acc = x @ h2["weight"].T.astype(np.float32) * h2["scale"]
+        acc += h2["bias"].astype(np.float32)
         x = np.clip(acc, 0, 1.0)
         
         # Output
         out = layers["output"]
-        acc = x @ out["weight"].T.astype(np.float32) + out["bias"].astype(np.float32)
-        acc = acc * out["scale"]
+        acc = x @ out["weight"].T.astype(np.float32) * out["scale"]
+        acc += out["bias"].astype(np.float32)
         
         return acc.squeeze(-1)
 
