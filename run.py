@@ -477,6 +477,19 @@ def run_full_training(config, is_kaggle):
                         print(f"  Checkpoint upload failed: {e}")
         except Exception as e2:
             print(f"  Emergency checkpoint failed: {e2}")
+        # Shutdown uploader and streaming manager after interrupt,
+        # so emergency checkpoint upload completes before exit.
+        if hf_uploader:
+            try:
+                hf_uploader.shutdown(wait=True)
+            except Exception:
+                pass
+        if streaming_manager:
+            try:
+                streaming_manager.shutdown()
+            except Exception:
+                pass
+        return 1
     except Exception as e:
         print(f"\n  Training error: {e}")
         import traceback

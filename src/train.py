@@ -257,6 +257,14 @@ class NNUELightningModule(pl.LightningModule):
         if self.config.get("advanced", {}).get("ema", {}).get("enabled", True):
             self.ema_model = self.model.create_ema()
             self.ema_model.to(self.device)
+            # Restore EMA state from checkpoint on resume
+            _ema_sd = getattr(self, '_ema_state_dict', None)
+            if _ema_sd:
+                try:
+                    self.ema_model.load_state_dict(_ema_sd)
+                    print("  EMA state restored from checkpoint")
+                except Exception as e:
+                    print(f"  Warning: Could not restore EMA state: {e}")
         
         # Compile model if requested
         if self.config.get("hardware", {}).get("compile_model", True):

@@ -327,34 +327,43 @@ class ExportVerifier:
                             f"Layer {name} dims: expected ({exp_in}, {exp_out}), got ({in_features}, {out_features})"
                         )
                     
-                    # Skip layer data - detect format: quantized has int8 weights + float32 scales + int32 bias,
-                    # float has float32 weights + float32 bias (no scales). Try reading data for both.
-                    quantized_total = out_features * in_features + out_features * 4 + out_features * 4
-                    float_total = out_features * in_features * 4 + out_features * 4
+                    # Detect format: quantized has int8 weights + float32 scales + int32 bias,
+                    # float has float32 weights + float32 bias (no scales).
+                    # Compute expected total file size for both formats and use the match,
+                    # since trying quantized first would always succeed on float files
+                    # (there are always enough bytes to read).
+                    header_size = 4 + 4 + 32 + 32  # magic + version + feature_hash + network_hash
+                    layer_overhead = 8  # in_features + out_features per layer
+                    quantized_total = header_size
+                    float_total = header_size
+                    for _, (exp_in, exp_out) in zip(layer_names, expected_dims):
+                        quantized_total += layer_overhead + exp_out * exp_in + exp_out * 4 + exp_out * 4
+                        float_total += layer_overhead + exp_out * exp_in * 4 + exp_out * 4
+                    
+                    actual_size = nnue_path.stat().st_size
+                    use_quantized = abs(actual_size - quantized_total) <= abs(actual_size - float_total)
                     
                     pos_before = f.tell()
                     
-                    # Try quantized format first
-                    w_q = f.read(out_features * in_features)
-                    s_q = f.read(out_features * 4)
-                    b_q = f.read(out_features * 4)
-                    quantized_ok = (len(w_q) == out_features * in_features and 
-                                    len(s_q) == out_features * 4 and 
-                                    len(b_q) == out_features * 4)
-                    
-                    if quantized_ok:
-                        # Successfully read quantized format - position already advanced
-                        pass
+                    if use_quantized:
+                        w_q = f.read(out_features * in_features)
+                        s_q = f.read(out_features * 4)
+                        b_q = f.read(out_features * 4)
+                        quantized_ok = (len(w_q) == out_features * in_features and 
+                                        len(s_q) == out_features * 4 and 
+                                        len(b_q) == out_features * 4)
+                        if not quantized_ok:
+                            results["warnings"].append(
+                                f"Layer {name}: truncated quantized data"
+                            )
                     else:
-                        # Try float format
-                        f.seek(pos_before)
                         w_f = f.read(out_features * in_features * 4)
                         b_f = f.read(out_features * 4)
                         float_ok = (len(w_f) == out_features * in_features * 4 and 
                                     len(b_f) == out_features * 4)
                         if not float_ok:
                             results["warnings"].append(
-                                f"Layer {name}: could not read layer data (needed {quantized_total} or {float_total} bytes)"
+                                f"Layer {name}: truncated float data (needed {out_features * in_features * 4 + out_features * 4} bytes)"
                             )
                 
                 # Check EOF
