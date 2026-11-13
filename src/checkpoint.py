@@ -498,7 +498,21 @@ def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
                 if not local_path.exists():
                     # Fallback: hf_hub_download with local_dir stores at
                     # local_dir/<repo_id>/<filename>, try that path too
-                    fallback_path = Path(ckpt_dir) / source_repo_id / latest if (source_repo_id := hf_cfg.get("repo_id", "")) else None
+                    # Re-derive repo_id from config or auto-generate from token
+                    repo_id_fallback = hf_cfg.get("repo_id", "")
+                    if not repo_id_fallback:
+                        token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
+                        if token:
+                            try:
+                                from huggingface_hub import HfApi
+                                api = HfApi(token=token)
+                                user_info = api.whoami(token=token)
+                                username = user_info.get("name") or user_info.get("user", {}).get("name")
+                                if username:
+                                    repo_id_fallback = f"{username}/{hf_cfg.get('repo_name', 'chess-nnue')}"
+                            except Exception:
+                                pass
+                    fallback_path = Path(ckpt_dir) / repo_id_fallback / latest if repo_id_fallback else None
                     if fallback_path and fallback_path.exists():
                         local_path = fallback_path
                     else:

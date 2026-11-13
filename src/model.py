@@ -205,13 +205,17 @@ class NNUEModel(nn.Module):
         return x
 
     def compile_model(self, mode: str = "max-autotune") -> "NNUEModel":
-        """Compile model with torch.compile for speed."""
+        """Compile model with torch.compile for speed.
+        
+        Returns the compiled model (caller must reassign):
+            model = model.compile_model()
+        """
         if hasattr(torch, 'compile'):
             try:
-                # fullgraph=False allows Python fallbacks for unsupported ops
-                # while still getting major speedup from graph capture
-                self = torch.compile(self, mode=mode, fullgraph=False)
+                # torch.compile returns a new _OrigMod wrapper; must return it
+                compiled = torch.compile(self, mode=mode, fullgraph=False)
                 print(f"Model compiled with torch.compile(mode={mode})")
+                return compiled
             except Exception as e:
                 print(f"torch.compile failed: {e}")
         return self
@@ -223,7 +227,13 @@ class NNUEModel(nn.Module):
     def create_ema(self) -> "NNUEModel":
         """Create EMA copy of the model."""
         ema_model = NNUEModel(self.config)
-        ema_model.load_state_dict(self.state_dict())
+        # Strip _orig_mod. prefix if self is a compiled model
+        state = self.state_dict()
+        clean_state = {}
+        for k, v in state.items():
+            clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+            clean_state[clean_key] = v
+        ema_model.load_state_dict(clean_state)
         ema_model.eval()
         for param in ema_model.parameters():
             param.requires_grad = False

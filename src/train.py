@@ -438,11 +438,13 @@ class NNUELightningModule(pl.LightningModule):
             
             # Get optimizer/scheduler with protection (may not be available before trainer.fit() completes setup)
             try:
-                opt = self.optimizers()[0] if self.optimizers() else None
+                optimizers = self.optimizers()
+                opt = optimizers[0] if optimizers else None
             except Exception:
                 opt = None
             try:
-                sched = self.lr_schedulers()[0] if self.lr_schedulers() else None
+                scheds = self.lr_schedulers()
+                sched = scheds[0] if scheds else None
             except Exception:
                 sched = None
             

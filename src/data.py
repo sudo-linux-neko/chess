@@ -1172,8 +1172,10 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     # but callers use data_dir.glob("*.binpack") which expects data_dir/<filename>
                     link_path = data_dir / filename
                     try:
-                        if not link_path.exists():
-                            link_path.symlink_to(actual_path)
+                        # Remove existing link/file if it's broken or wrong
+                        if link_path.exists() or link_path.is_symlink():
+                            link_path.unlink(missing_ok=True)
+                        link_path.symlink_to(actual_path)
                     except Exception:
                         # Symlinks not supported, use actual path
                         link_path = actual_path
