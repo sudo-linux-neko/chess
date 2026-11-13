@@ -575,9 +575,9 @@ class NNUEExporter:
                     raise ValueError(f"Invalid NNUE file: too short (layer {name} out_features)")
                 out_features = struct.unpack("<I", out_features_bytes)[0]
 
-                weight_size = out_features * in_features
-                weight = np.frombuffer(f.read(weight_size), dtype=np.float32)
-                if len(weight) < weight_size:
+                weight_bytes = out_features * in_features * 4  # float32 = 4 bytes per element
+                weight = np.frombuffer(f.read(weight_bytes), dtype=np.float32)
+                if len(weight) < out_features * in_features:
                     raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
 

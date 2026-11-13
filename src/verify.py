@@ -327,8 +327,35 @@ class ExportVerifier:
                             f"Layer {name} dims: expected ({exp_in}, {exp_out}), got ({in_features}, {out_features})"
                         )
                     
-                    # Skip data
-                    f.seek(out_features * in_features + out_features * 4 + out_features * 4, 1)
+                    # Skip layer data - detect format: quantized has int8 weights + float32 scales + int32 bias,
+                    # float has float32 weights + float32 bias (no scales). Try reading data for both.
+                    quantized_total = out_features * in_features + out_features * 4 + out_features * 4
+                    float_total = out_features * in_features * 4 + out_features * 4
+                    
+                    pos_before = f.tell()
+                    
+                    # Try quantized format first
+                    w_q = f.read(out_features * in_features)
+                    s_q = f.read(out_features * 4)
+                    b_q = f.read(out_features * 4)
+                    quantized_ok = (len(w_q) == out_features * in_features and 
+                                    len(s_q) == out_features * 4 and 
+                                    len(b_q) == out_features * 4)
+                    
+                    if quantized_ok:
+                        # Successfully read quantized format - position already advanced
+                        pass
+                    else:
+                        # Try float format
+                        f.seek(pos_before)
+                        w_f = f.read(out_features * in_features * 4)
+                        b_f = f.read(out_features * 4)
+                        float_ok = (len(w_f) == out_features * in_features * 4 and 
+                                    len(b_f) == out_features * 4)
+                        if not float_ok:
+                            results["warnings"].append(
+                                f"Layer {name}: could not read layer data (needed {quantized_total} or {float_total} bytes)"
+                            )
                 
                 # Check EOF
                 remaining = f.read()
@@ -464,9 +491,9 @@ class ExportVerifier:
                     raise ValueError(f"Invalid NNUE file: too short (layer {name} out_features)")
                 out_features = struct.unpack("<I", out_features_bytes)[0]
 
-                weight_size = out_features * in_features
-                weight = np.frombuffer(f.read(weight_size), dtype=np.float32)
-                if len(weight) < weight_size:
+                weight_bytes = out_features * in_features * 4  # float32 = 4 bytes per element
+                weight = np.frombuffer(f.read(weight_bytes), dtype=np.float32)
+                if len(weight) < out_features * in_features:
                     raise ValueError(f"Invalid NNUE file: truncated weight for layer {name}")
                 weight = weight.reshape(out_features, in_features)
 
