@@ -353,7 +353,7 @@ def run_training(config: dict) -> int:
     print(f"Time budget: {config.get('time_budget', {}).get('hours', 9.5)} hours")
     print(f"GPUs: {config.get('hardware', {}).get('gpus', 2)}")
     print(f"Batch size: {config.get('training', {}).get('batch_size', 'N/A')} (global)")
-    print(f"Micro batch: {config.get('training', {}).get('micro_batch_size', 'N/A')} (accum x{config.get('advanced', {}).get('gradient_accumulation', 'N/A')})")
+    print(f"Micro batch: {config.get('training', {}).get('micro_batch_size', 'N/A')} (accum x{config.get('advanced', {}).get('gradient_accumulation', config.get('training', {}).get('accumulate_grad_batches', 'N/A'))})")
     print(f"LR: {config.get('training', {}).get('learning_rate', 'N/A')} (One-Cycle)")
     print(f"Architecture: FT(256 shared) -> L1(256) -> L2(32) -> Out(1)")
     print(f"Loss: WDL({config.get('training', {}).get('wdl_lambda', 'N/A')}) + Quantile Eval")

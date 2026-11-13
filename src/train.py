@@ -160,7 +160,10 @@ class NNUELightningModule(pl.LightningModule):
         
         self.batch_size = train_cfg.get("batch_size", 65536)
         self.micro_batch_size = train_cfg.get("micro_batch_size", 8192)
-        self.accum_steps = adv_cfg.get("gradient_accumulation", 8)
+        # Support both naming conventions: "advanced.gradient_accumulation" (train_ultra.yaml)
+        # and "training.accumulate_grad_batches" (train.yaml). The latter is the PL-standard
+        # key and takes precedence if both are set.
+        self.accum_steps = adv_cfg.get("gradient_accumulation", train_cfg.get("accumulate_grad_batches", 8))
         self.max_positions = train_cfg.get("max_positions", 55_000_000_000)
         
         # Loss functions
@@ -1267,7 +1270,7 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
         max_steps=config.get("training", {}).get("lr_schedule", {}).get("total_steps", 5108000),
         gradient_clip_val=config.get("training", {}).get("gradient_clip_val", 1.0),
         gradient_clip_algorithm=config.get("training", {}).get("gradient_clip_algorithm", "norm"),
-        accumulate_grad_batches=adv_cfg.get("gradient_accumulation", 8),
+        accumulate_grad_batches=adv_cfg.get("gradient_accumulation", config.get("training", {}).get("accumulate_grad_batches", 8)),
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=log_cfg.get("log_every_n_steps", 100),

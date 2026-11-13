@@ -1555,9 +1555,9 @@ def create_dataloader(
                 config=config,  # Pass config for curriculum settings
             )
 
-    # Gradient accumulation: effective batch = micro_batch * accum_steps
+    # Gradient accumulation handled by PyTorch Lightning via accumulate_grad_batches.
+    # DataLoader batch_size is the per-step (micro) batch size only.
     micro_batch = train_cfg.get("micro_batch_size", 8192)
-    accum_steps = adv_cfg.get("gradient_accumulation", 8)
     batch_size = micro_batch
 
     return DataLoader(
