@@ -677,6 +677,13 @@ class NNUELightningModule(pl.LightningModule):
         else:
             start_file = 0
             start_position = 0
+            # Reset resume base for new epoch so _update_data_position() estimates
+            # from the beginning of this epoch (not from the original resume point).
+            # Without this, stale _resume_start_file/_resume_start_position from a
+            # prior checkpoint resume would corrupt position estimation on epoch 2+.
+            self._resume_start_file = 0
+            self._resume_start_position = 0
+            self._samples_seen_at_resume = self.training_state.samples_seen
         
         loader = create_dataloader(
             self.config,
