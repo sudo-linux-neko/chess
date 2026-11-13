@@ -596,6 +596,7 @@ class StreamingDataManager:
         self._all_files: List[Path] = []          # All available files (downloaded + to-download)
         self._active_files: List[Path] = []       # Currently on disk
         self._downloaded_files: set = set()       # Files ever downloaded
+        self._actual_paths: Dict[Path, Path] = {}  # symlink -> actual file path mapping
         self._lock = threading.RLock()
         self._download_queue: deque = deque()
         self._download_thread: Optional[threading.Thread] = None
@@ -646,8 +647,6 @@ class StreamingDataManager:
                         self._all_files.append(link_path)
                         self._downloaded_files.add(link_path)
                         self._active_files.append(link_path)
-                        if not hasattr(self, '_actual_paths'):
-                            self._actual_paths = {}
                         self._actual_paths[str(link_path)] = actual_path if actual_path.exists() else link_path
                     # If actual file exists but no symlink yet - will be fixed on
                     # first _download_file call. Track as all_files but not yet downloaded.
@@ -780,8 +779,6 @@ class StreamingDataManager:
                 self._downloaded_files.add(link_path)
                 self._active_files.append(link_path)
                 # Track actual path for cleanup
-                if not hasattr(self, '_actual_paths'):
-                    self._actual_paths = {}
                 self._actual_paths[str(link_path)] = actual_path
             
             size_gb = actual_path.stat().st_size / 1024**3
