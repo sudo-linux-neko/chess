@@ -974,13 +974,20 @@ class StreamingDataManager:
         - Current active files are being consumed (consumption rate > 0)
         - We have less than min_prefetch_gb buffer
         - Or current file is > prefetch_threshold_pct consumed
+        
+        Never returns True if we're already at or over max_gb.
         """
         with self._lock:
             if not self._active_files:
                 return True  # No files at all
             
-            # Check if we have enough buffer
             current_gb = self._get_active_size_gb()
+            
+            # Never prefetch if already at or over max_gb
+            if current_gb >= self.stream_cfg.max_gb:
+                return False
+            
+            # Check if we have enough buffer
             if current_gb < self._min_prefetch_gb:
                 return True
             
