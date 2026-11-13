@@ -177,10 +177,12 @@ class NNUELightningModule(pl.LightningModule):
         # Lambda schedule (WDL/eval blending)
         self.lambda_cfg = train_cfg.get("lambda_schedule", {})
         self.start_lambda = float(self.lambda_cfg.get("start_lambda", 1.0))
-        self.end_lambda = float(self.lambda_cfg.get("end_lambda", 1.0))
+        self.lambda_delta = float(self.lambda_cfg.get("delta", -0.3))
+        # end_lambda defaults to start_lambda + delta so the schedule
+        # is continuous (no jump after total_steps)
+        self.end_lambda = float(self.lambda_cfg.get("end_lambda", self.start_lambda + self.lambda_delta))
         self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", 5052000))
         self.lambda_warmup_pct = float(self.lambda_cfg.get("warmup_pct", 0.25))
-        self.lambda_delta = float(self.lambda_cfg.get("delta", -0.3))
         self.lambda_jitter = self.lambda_cfg.get("jitter", {})
         
         # Curriculum learning
