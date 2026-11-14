@@ -1259,8 +1259,15 @@ class OverfittingCallback(Callback):
             if hasattr(model, '_orig_mod'):
                 model = model._orig_mod
             model.load_state_dict(self.best_model_state)
+            # EMA model is a standalone NNUEModel (not a submodule), so strip
+            # the 'ema_model.' prefix that exists in best_model_state (saved
+            # from the full model which has ema_model as a submodule).
             if pl_module.ema_model is not None:
-                pl_module.ema_model.load_state_dict(self.best_model_state)
+                clean_ema_state = {}
+                for k, v in self.best_model_state.items():
+                    clean_key = k.replace('ema_model.', '', 1) if k.startswith('ema_model.') else k
+                    clean_ema_state[clean_key] = v
+                pl_module.ema_model.load_state_dict(clean_ema_state)
             print(f"   ✅ Restored best model (val_loss={self.best_val_loss:.4f})")
 
 
