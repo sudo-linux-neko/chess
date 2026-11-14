@@ -196,7 +196,8 @@ class NNUELightningModule(pl.LightningModule):
         if _end_lambda is None:
             _end_lambda = self.start_lambda + self.lambda_delta
         self.end_lambda = float(_end_lambda)
-        self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", 5052000))
+        # Support both "T0" (Stockfish terminology) and "total_steps" config keys
+        self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", self.lambda_cfg.get("T0", 5052000)))
         self.lambda_warmup_pct = float(self.lambda_cfg.get("warmup_pct", 0.25))
         self.lambda_jitter = self.lambda_cfg.get("jitter", {})
         if self.lambda_jitter is None:
@@ -910,8 +911,20 @@ class NNUELightningModule(pl.LightningModule):
             self.training_state.lambda_history = ts.get("lambda_history", [])
             self.training_state.time_elapsed = ts.get("time_elapsed", 0.0)
             # Restore data resume position
+            # current_file_idx is a GLOBAL index (includes rank offset from
+            # _update_data_position: base_file + rank + files_completed * world_size).
+            # Convert to rank-local so _update_data_position() can add rank back
+            # without double-counting on resume.
             self.training_state.current_file_idx = ts.get("current_file_idx", 0)
             self.training_state.current_position = ts.get("current_position", 0)
+            rank = int(os.environ.get("RANK", "0"))
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            current_file_idx = ts.get("current_file_idx", 0)
+            if world_size > 1:
+                self._resume_start_file = max(0, current_file_idx - rank)
+            else:
+                self._resume_start_file = current_file_idx
+            self._resume_start_position = ts.get("current_position", 0)
             # Track previously elapsed time so time budget is correct across resumes
             self._resume_time_offset = ts.get("time_elapsed", 0.0)
             # Track step offset so training_state.step continues from checkpoint value
@@ -919,8 +932,6 @@ class NNUELightningModule(pl.LightningModule):
             self._resume_step_offset = ts.get("step", 0)
             # Track samples seen at resume for correct data position estimation
             self._samples_seen_at_resume = ts.get("samples_seen", 0)
-            self._resume_start_file = ts.get("current_file_idx", 0)
-            self._resume_start_position = ts.get("current_position", 0)
         
         # Restore lambda jitter RNG state for exact continuity across resume
         data_state = checkpoint.get("data_state", {})

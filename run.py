@@ -355,7 +355,15 @@ def run_full_training(config, is_kaggle):
             # Restore samples_seen_at_resume and resume start position so _update_data_position()
             # correctly estimates post-resume data position (not counting pre-resume samples)
             pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
-            pl_module._resume_start_file = pl_module.training_state.current_file_idx
+            # current_file_idx is GLOBAL (includes rank offset). Convert to rank-local
+            # so _update_data_position() can add rank back without double-counting.
+            rank = int(os.environ.get("RANK", "0"))
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            current_file_idx = pl_module.training_state.current_file_idx
+            if world_size > 1:
+                pl_module._resume_start_file = max(0, current_file_idx - rank)
+            else:
+                pl_module._resume_start_file = current_file_idx
             pl_module._resume_start_position = pl_module.training_state.current_position
             # Restore _lambda_rng state for exact lambda jitter continuity across resume
             _lambda_rng_state = checkpoint_result.get("data_state", {}).get("_lambda_rng")

@@ -246,16 +246,18 @@ class NNUEModel(nn.Module):
 
         decay = decay or self.ema_decay
         with torch.no_grad():
-            ema_params = list(self.ema_model.parameters())
-            # Get model parameters EXCLUDING ema_model submodule (to avoid double-counting)
-            # since ema_model is a submodule of self, self.parameters() includes EMA params too
-            params = []
-            for name, param in self.named_parameters(recurse=True):
-                if not name.startswith('ema_model.'):
-                    params.append(param)
-            assert len(ema_params) == len(params), f"EMA/model parameter count mismatch: {len(ema_params)} vs {len(params)}"
-            for ema_param, param in zip(ema_params, params):
-                ema_param.mul_(decay).add_(param, alpha=1.0 - decay)
+            # Match parameters by NAME (not position) to avoid silent EMA corruption
+            # if parameter registration order ever differs between model and EMA copy.
+            ema_params = dict(self.ema_model.named_parameters())
+            params = dict(self.named_parameters(recurse=True))
+            # Exclude ema_model submodule params from main model (avoid double-counting)
+            params = {k: v for k, v in params.items() if not k.startswith('ema_model.')}
+            common_keys = set(ema_params.keys()) & set(params.keys())
+            if len(common_keys) != len(ema_params) or len(common_keys) != len(params):
+                print(f"  Warning: EMA/model parameter key mismatch: "
+                      f"ema={len(ema_params)}, model={len(params)}, common={len(common_keys)}")
+            for name in common_keys:
+                ema_params[name].mul_(decay).add_(params[name], alpha=1.0 - decay)
 
     def forward_ema(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using EMA model."""
