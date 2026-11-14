@@ -339,7 +339,10 @@ class CheckpointManager:
                 raise RuntimeError(f"Checkpoint corruption detected: {path}")
 
         print(f"Loading checkpoint: {path}")
-        checkpoint = torch.load(path, map_location='cpu')
+        # PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints
+        # containing numpy arrays, TrainingState objects, etc. Use False since
+        # we only load our own checkpoints (trusted source).
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
 
         # Load model - strip _orig_mod. prefix for compatibility with compiled/uncompiled models
         model_state = checkpoint["model"]
