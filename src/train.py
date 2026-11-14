@@ -715,12 +715,10 @@ class NNUELightningModule(pl.LightningModule):
         if use_resume_pos:
             start_file = self.training_state.current_file_idx
             start_position = self.training_state.current_position
-            # Adjust start_file for DDP stride sharding: rank 0's saved position
-            # is the base; each rank r starts at base + r (its next file in the
-            # stride shard). Without this, all ranks resume from rank 0's position
-            # causing duplicate data processing on non-zero ranks.
-            rank = int(os.environ.get("RANK", "0"))
-            start_file += rank
+            # current_file_idx is already a global index (includes rank offset
+            # from _update_data_position: base_file + rank + files_completed *
+            # world_size). Do NOT add rank again — that would double-count and
+            # skip a file on non-zero ranks.
             # Track samples_seen at resume so _update_data_position() can correctly
             # estimate post-resume position (samples_seen includes pre-resume samples)
             self._samples_seen_at_resume = self.training_state.samples_seen
