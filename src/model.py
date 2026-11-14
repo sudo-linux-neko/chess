@@ -246,7 +246,10 @@ class NNUEModel(nn.Module):
 
         decay = decay or self.ema_decay
         with torch.no_grad():
-            for ema_param, param in zip(self.ema_model.parameters(), self.parameters()):
+            ema_params = list(self.ema_model.parameters())
+            params = list(self.parameters())
+            assert len(ema_params) == len(params), f"EMA/model parameter count mismatch: {len(ema_params)} vs {len(params)}"
+            for ema_param, param in zip(ema_params, params):
                 ema_param.mul_(decay).add_(param, alpha=1.0 - decay)
 
     def forward_ema(self, x: torch.Tensor) -> torch.Tensor:
