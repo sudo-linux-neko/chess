@@ -294,7 +294,12 @@ class NNUEExporter:
 
     def _compute_network_hash(self, model: nn.Module) -> str:
         hasher = hashlib.sha256()
-        for param in model.parameters():
+        # Filter out ema_model submodule parameters to avoid double-counting
+        # (ema_model is a submodule of NNUEModel, so model.parameters()
+        # would include EMA params too, corrupting the hash)
+        for name, param in model.named_parameters():
+            if name.startswith("ema_model."):
+                continue
             hasher.update(param.data.cpu().numpy().tobytes())
         # Include architecture config for uniqueness
         try:

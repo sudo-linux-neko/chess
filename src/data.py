@@ -279,7 +279,10 @@ class StreamingBinpackDataset(IterableDataset):
                 version = struct.unpack("<I", f.read(4))[0]
                 num_positions = struct.unpack("<Q", f.read(8))[0]
 
-                start_pos = self.current_position if file_idx == self.current_file_idx else 0
+                # Read resume position atomically - current_position/current_file_idx
+                # are updated under _position_lock during iteration
+                with self._position_lock:
+                    start_pos = self.current_position if file_idx == self.current_file_idx else 0
                 
                 for _ in range(start_pos):
                     self._skip_position(f)

@@ -644,9 +644,12 @@ def run_full_training(config, is_kaggle):
         exporter = create_exporter(config)
         
         # Try to get test data for export verification
+        # Don't pass streaming_manager for test data - we don't need
+        # predictive prefetching for export calibration, and waiting
+        # for streaming files can hang for up to 120 seconds.
         test_data = None
         try:
-            test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
+            test_loader = create_dataloader(config, is_train=False)
             test_batch = next(iter(test_loader), None)
             if test_batch is None:
                 raise StopIteration("empty dataloader")

@@ -261,8 +261,10 @@ class HFUploader:
                 repo_ready = self._ensure_repo_exists(api)
 
             if not self._hf_available or not api or not repo_ready:
-                # Re-queue task for later retry instead of losing it permanently
-                # Check max_retries to avoid infinite re-queueing when HF is unavailable
+                # Re-queue task for later retry instead of losing it permanently.
+                # Do NOT count this as an upload retry - _process_task handles
+                # actual upload attempt retries. HF unavailability is not an
+                # upload failure, so we shouldn't consume retry budget for it.
                 if task.retries >= task.max_retries:
                     task.status = UploadStatus.FAILED
                     task.error = "HF unavailable - max retries exceeded"
@@ -273,7 +275,6 @@ class HFUploader:
                     continue
                 # Mark as pending again so it can be retried when HF becomes available
                 task.status = UploadStatus.PENDING
-                task.retries += 1  # Count this re-queue as a retry attempt
                 with self._lock:
                     self._step_counter += 1
                     counter = self._step_counter
