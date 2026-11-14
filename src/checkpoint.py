@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 import torch
 import torch.nn as nn
@@ -96,7 +96,7 @@ class CheckpointManager:
         """Save complete training checkpoint atomically."""
         with self._lock:
             step = int(getattr(training_state, 'step', 0))
-            timestamp = datetime.now(datetime.UTC).isoformat() + 'Z'
+            timestamp = datetime.now(timezone.utc).isoformat() + 'Z'
 
             # Prepare state dict
             state = {
@@ -140,13 +140,16 @@ class CheckpointManager:
             if self.save_data_state and data_state is not None:
                 state["data_state"] = data_state
             if ema_model is not None:
-                ema_state = ema_model.state_dict()
-                # Strip _orig_mod. prefix for compatibility (in case ema_model is compiled)
-                clean_ema_state = {}
-                for k, v in ema_state.items():
-                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                    clean_ema_state[clean_key] = v
-                state["ema_model"] = clean_ema_state
+                try:
+                    ema_state = ema_model.state_dict()
+                    # Strip _orig_mod. prefix for compatibility (in case ema_model is compiled)
+                    clean_ema_state = {}
+                    for k, v in ema_state.items():
+                        clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                        clean_ema_state[clean_key] = v
+                    state["ema_model"] = clean_ema_state
+                except Exception as e:
+                    print(f"  Warning: Could not save EMA state: {e}")
 
             # Generate filename
             if is_best:
@@ -398,13 +401,16 @@ class CheckpointManager:
 
         # Load EMA
         if ema_model is not None and "ema_model" in checkpoint:
-            ema_state = checkpoint["ema_model"]
-            # Strip _orig_mod. prefix for compatibility with compiled models
-            clean_ema_state = {}
-            for k, v in ema_state.items():
-                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                clean_ema_state[clean_key] = v
-            ema_model.load_state_dict(clean_ema_state)
+            try:
+                ema_state = checkpoint["ema_model"]
+                # Strip _orig_mod. prefix for compatibility with compiled models
+                clean_ema_state = {}
+                for k, v in ema_state.items():
+                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                    clean_ema_state[clean_key] = v
+                ema_model.load_state_dict(clean_ema_state)
+            except Exception as e:
+                print(f"  Warning: Could not restore EMA state: {e}")
 
         # Return training state and data state for manual restoration
         result = {
