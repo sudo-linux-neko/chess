@@ -741,6 +741,8 @@ def run_training(config: dict) -> int:
     try:
         test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
         test_batch = next(iter(test_loader), None)
+        if test_batch is None:
+            raise StopIteration("empty dataloader")
         test_data = test_batch["features"][:100]
     except Exception as e:
         print(f"  Warning: Could not get test data for export: {e}")
