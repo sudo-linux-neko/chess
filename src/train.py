@@ -355,6 +355,12 @@ class NNUELightningModule(pl.LightningModule):
         automatically scales loss for gradient accumulation. Manual division would
         cause double-division, making gradients accum_steps^2 too small.
         """
+        # Sync training_state.step with PL's global_step (accounts for resume offset).
+        # This must happen BEFORE _get_lambda() so lambda uses the correct step.
+        # on_train_batch_end() also updates this (idempotent), but training_step
+        # runs first and _get_lambda() needs the current value.
+        self.training_state.step = self.trainer.global_step + self._resume_step_offset
+        
         features = batch["features"].to(self.device, non_blocking=True)
         wdl_target = batch["wdl"].to(self.device, non_blocking=True)
         eval_target = batch["eval"].to(self.device, non_blocking=True)
