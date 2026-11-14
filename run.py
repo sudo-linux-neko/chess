@@ -270,6 +270,10 @@ def run_full_training(config, is_kaggle):
                 download_training_data(data_dir, config, max_files=6)
                 binpack_files = list(data_dir.glob("*.binpack"))
             print(f"  Found {len(binpack_files)} data files")
+            if not binpack_files:
+                print("  ERROR: No data files available - cannot start training")
+                print("  Enable streaming mode or download data manually.")
+                return 1
         except Exception as e:
             print(f"  ERROR: Data setup failed: {e}")
             return 1
