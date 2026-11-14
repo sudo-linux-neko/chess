@@ -67,6 +67,18 @@ class HFUploader:
         self.config = config
         hf_cfg = config.get("hf", {})
 
+        # Try to import huggingface_hub early (needed for repo_id auto-generation)
+        self._hf_available = False
+        self.HfApi = None
+        self.upload_file = None
+        try:
+            from huggingface_hub import HfApi, upload_file
+            self.HfApi = HfApi
+            self.upload_file = upload_file
+            self._hf_available = True
+        except ImportError:
+            logger.warning("huggingface_hub not available, uploads disabled")
+
         # If no repo_id provided, auto-generate as {username}/chess-nnue
         self.repo_id = hf_cfg.get("repo_id", "")
         self.repo_name = hf_cfg.get("repo_name", "chess-nnue")
@@ -101,16 +113,6 @@ class HFUploader:
         }
         self._lock = threading.Lock()
         self._step_counter = 0  # Monotonic counter for PriorityQueue tiebreaking
-
-        # Try to import huggingface_hub
-        self._hf_available = False
-        try:
-            from huggingface_hub import HfApi, upload_file
-            self.HfApi = HfApi
-            self.upload_file = upload_file
-            self._hf_available = True
-        except ImportError:
-            logger.warning("huggingface_hub not available, uploads disabled")
 
     def _ensure_repo_exists(self, api):
         """Create repo if it doesn't exist. Auto-generates repo_id as {username}/chess-nnue if not provided."""
