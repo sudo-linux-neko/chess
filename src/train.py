@@ -1328,12 +1328,16 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     # Logger
     logger = None
     if log_cfg.get("tensorboard", True):
-        from pytorch_lightning.loggers import TensorBoardLogger
-        logger = TensorBoardLogger(
-            save_dir=log_cfg.get("dir", "/kaggle/working/logs"),
-            name="nnue",
-            version=None,
-        )
+        try:
+            from pytorch_lightning.loggers import TensorBoardLogger
+            logger = TensorBoardLogger(
+                save_dir=log_cfg.get("dir", "/kaggle/working/logs"),
+                name="nnue",
+                version=None,
+            )
+        except ImportError:
+            print("  WARNING: TensorBoard not installed, using CSV logger instead")
+            logger = None
     
     # Precision
     precision = "16-mixed" if hw_cfg.get("fp16", True) else "32-true"
