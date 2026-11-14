@@ -641,10 +641,11 @@ class NNUELightningModule(pl.LightningModule):
             position_in_file = remaining % ppf
         
         # Convert per-rank shard position to global file index.
-        # Each rank processes files[rank::world_size], so `files_completed` shard files
-        # advances the global index by files_completed * world_size. Add rank offset
-        # so each rank starts at its correct stride position.
-        global_file_idx = base_file + rank + files_completed * world_size
+        # base_file is already a global index (it was saved as global_file_idx
+        # at checkpoint time, which includes the rank offset). Each rank's
+        # shard files advances the global index by files_completed * world_size.
+        # Do NOT add rank again — that would double-count the DDP offset.
+        global_file_idx = base_file + files_completed * world_size
         
         self.training_state.current_file_idx = min(global_file_idx, num_files - 1)
         self.training_state.current_position = min(position_in_file, ppf - 1)
