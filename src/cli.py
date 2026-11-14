@@ -376,7 +376,6 @@ def run_smoke_test(config: dict) -> int:
         # Use calibration data from dummy binpack for better quantization scales
         cal_data = None
         try:
-            from src.data import create_dataloader
             cal_loader = create_dataloader(config, is_train=False)
             cal_batch = next(iter(cal_loader), None)
             if cal_batch is not None:
