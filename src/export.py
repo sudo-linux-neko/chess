@@ -181,9 +181,9 @@ class NNUEExporter:
         weight_q = np.round(weight / scales[:, np.newaxis]).astype(np.int8)
         weight_q = np.clip(weight_q, -128, 127)
 
-        # Quantize bias (Stockfish-compatible: stored as int32, added directly without scale)
-        # Stockfish .nnue format: output = x @ weight_q.T * scales + bias_q
-        bias_q = np.round(bias).astype(np.int32)
+        # Quantize bias (Stockfish-compatible: per-channel scale-normalized int32)
+        # bias_q = round(bias / scale) so inference: (dot + bias_q) * scale ≈ dot * weight + bias
+        bias_q = np.round(bias / scales).astype(np.int32)
 
         # Verify quantization accuracy if calibration data provided
         if calibration_data is not None:
@@ -526,27 +526,23 @@ class NNUEExporter:
         
         # Feature transformer
         x_flat = x.reshape(-1, features_per_bucket)
-        acc = x_flat @ ft.weight.T.astype(np.float32) * ft.scale
-        acc += ft.bias.astype(np.float32)
+        acc = (x_flat @ ft.weight.T.astype(np.float32) + ft.bias.astype(np.float32)) * ft.scale
         x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
         
         # Hidden1
         h1 = layers["hidden1"]
-        acc = x @ h1.weight.T.astype(np.float32) * h1.scale
-        acc += h1.bias.astype(np.float32)
+        acc = (x @ h1.weight.T.astype(np.float32) + h1.bias.astype(np.float32)) * h1.scale
         x = np.clip(acc, 0, 1.0)
         
         # Hidden2
         h2 = layers["hidden2"]
-        acc = x @ h2.weight.T.astype(np.float32) * h2.scale
-        acc += h2.bias.astype(np.float32)
+        acc = (x @ h2.weight.T.astype(np.float32) + h2.bias.astype(np.float32)) * h2.scale
         x = np.clip(acc, 0, 1.0)
         
         # Output
         out = layers["output"]
-        acc = x @ out.weight.T.astype(np.float32) * out.scale
-        acc += out.bias.astype(np.float32)
+        acc = (x @ out.weight.T.astype(np.float32) + out.bias.astype(np.float32)) * out.scale
         
         return acc.squeeze(-1)
 
