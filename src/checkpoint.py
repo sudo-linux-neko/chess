@@ -78,7 +78,6 @@ class CheckpointManager:
         self.atomic_writes = ckpt_cfg.get("include_atomic_write", ckpt_cfg.get("atomic_writes", ckpt_cfg.get("atomic_write", True)))
 
         self._lock = threading.Lock()
-        self._metadata_cache: Dict[str, CheckpointMetadata] = {}
 
     def save_checkpoint(
         self,
@@ -194,9 +193,6 @@ class CheckpointManager:
                 meta_path = final_path.with_suffix('.meta.json')
                 with open(meta_path, 'w') as f:
                     json.dump(asdict(metadata), f, indent=2)
-
-                # Update cache
-                self._metadata_cache[str(final_path)] = metadata
 
                 # Rotation
                 self._rotate_checkpoints(is_best)
