@@ -265,7 +265,7 @@ if not CONFIG_PATH.exists():
             "repo_name": "chess-nnue",
             "token_env": "HF_TOKEN",
             "auto_create_repo": True,
-            "private": False,
+            "repo_private": False,
             "upload_workers": 1,
             "max_retries": 5,
             "retry_backoff_base": 30,
