@@ -481,6 +481,7 @@ class CheckpointManager:
 def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
     """Find the best checkpoint to resume from (local or HF)."""
     checkpoint_manager = CheckpointManager(config)
+    local_path: Optional[Path] = None  # Prevent UnboundLocalError if no local/HF checkpoint
     
     # Try local first
     local_ckpt = checkpoint_manager.find_latest_checkpoint()

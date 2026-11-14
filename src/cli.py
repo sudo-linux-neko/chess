@@ -784,12 +784,18 @@ def run_training(config: dict) -> int:
         if hf_uploader:
             hf_uploader.queue_export(nnue_path)
     if hf_uploader:
-        hf_uploader.shutdown(wait=True)
+        try:
+            hf_uploader.shutdown(wait=True)
+        except Exception:
+            pass
 
     # Shutdown streaming manager
     if streaming_manager:
-        print("Shutting down streaming data manager...")
-        streaming_manager.shutdown()
+        try:
+            print("Shutting down streaming data manager...")
+            streaming_manager.shutdown()
+        except Exception:
+            pass
 
     print("\n" + "=" * 60)
     print("TRAINING COMPLETE")
