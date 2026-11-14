@@ -244,11 +244,14 @@ class CheckpointManager:
 
     def _set_rng_state(self, state: Dict):
         """Restore all RNG states."""
-        torch.set_rng_state(state["torch"])
-        if state["torch_cuda"] is not None and torch.cuda.is_available():
+        if state.get("torch") is not None:
+            torch.set_rng_state(state["torch"])
+        if state.get("torch_cuda") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state["torch_cuda"])
-        __import__('numpy').random.set_state(state["numpy"])
-        __import__('random').setstate(state["python"])
+        if state.get("numpy") is not None:
+            __import__('numpy').random.set_state(state["numpy"])
+        if state.get("python") is not None:
+            __import__('random').setstate(state["python"])
 
     def _compute_sha256(self, filepath: Path) -> str:
         """Compute SHA256 of file."""
