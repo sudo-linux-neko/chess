@@ -178,12 +178,13 @@ class NNUEExporter:
         scales = max_vals / 127.0
 
         # Quantize weights
-        weight_q = np.round(weight / scales[:, np.newaxis]).astype(np.int8)
-        weight_q = np.clip(weight_q, -128, 127)
+        # Clip BEFORE astype to prevent int8 overflow/wrap-around (e.g., 200 -> -56 instead of 127)
+        weight_q = np.clip(np.round(weight / scales[:, np.newaxis]), -128, 127).astype(np.int8)
 
         # Quantize bias (Stockfish-compatible: per-channel scale-normalized int32)
         # bias_q = round(bias / scale) so inference: (dot + bias_q) * scale ≈ dot * weight + bias
-        bias_q = np.round(bias / scales).astype(np.int32)
+        # Clip before astype to prevent int32 overflow on extreme values
+        bias_q = np.clip(np.round(bias / scales), -2**31, 2**31 - 1).astype(np.int32)
 
         # Verify quantization accuracy if calibration data provided
         if calibration_data is not None:
