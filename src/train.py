@@ -890,9 +890,22 @@ class NNUELightningModule(pl.LightningModule):
             self._resume_start_file = ts.get("current_file_idx", 0)
             self._resume_start_position = ts.get("current_position", 0)
         
-        # Load EMA state
-        if "ema_state_dict" in checkpoint and self.ema_model is not None:
-            self.ema_model.load_state_dict(checkpoint["ema_state_dict"])
+        # Restore lambda jitter RNG state for exact continuity across resume
+        data_state = checkpoint.get("data_state", {})
+        _lambda_rng_state = data_state.get("_lambda_rng") if isinstance(data_state, dict) else None
+        if _lambda_rng_state is not None:
+            self._lambda_rng_state = _lambda_rng_state
+        
+        # Load EMA state (checkpoint_manager.save_checkpoint uses "ema_model" key,
+        # PL's on_save_checkpoint uses "ema_state_dict" key - support both)
+        ema_state = checkpoint.get("ema_state_dict") or checkpoint.get("ema_model")
+        if ema_state and self.ema_model is not None:
+            # Strip _orig_mod. prefix for compatibility with compiled/uncompiled models
+            clean_ema_state = {}
+            for k, v in ema_state.items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                clean_ema_state[clean_key] = v
+            self.ema_model.load_state_dict(clean_ema_state)
 
     def on_train_end(self):
         """Cleanup CUDA memory at end of training."""
