@@ -623,7 +623,10 @@ def run_training(config: dict) -> int:
             print(f"  Checkpoint saved: {ckpt_path}")
         except Exception as e:
             print(f"  Checkpoint save failed: {e}")
-        trainer.should_stop = True
+        try:
+            trainer.should_stop = True
+        except Exception:
+            pass
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

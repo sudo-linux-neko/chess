@@ -305,7 +305,11 @@ else:
     print(f"  Loaded config from {CONFIG_PATH}")
 
 # Override HF token from env
-config.setdefault("hf", {})["token_env"] = "HF_TOKEN"
+hf_cfg = config.get("hf")
+if not isinstance(hf_cfg, dict):
+    hf_cfg = {}
+    config["hf"] = hf_cfg
+hf_cfg["token_env"] = "HF_TOKEN"
 
 # -----------------------------------------------------------
 # 5. Check disk space

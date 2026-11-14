@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, '.')
 
+from src.data import StreamingBinpackDataset
+
 # --- Bug 13: _get_position_offset raises IndexError instead of returning 0 ---
 def test_bug13_position_offset_out_of_range():
     """_get_position_offset should raise IndexError, not return 0, for out-of-range idx."""
@@ -33,6 +35,8 @@ def test_bug13_position_offset_out_of_range():
             f.write(struct.pack("<b", 0))  # game_result
 
     ds = StreamingBinpackDataset.__new__(StreamingBinpackDataset)
+    ds._position_lock = threading.Lock()
+    ds._loader_lock = threading.Lock()
     ds._position_offsets_cache = {}
     ds._max_position_cache = 16
 
@@ -72,6 +76,8 @@ def test_bug15_cache_bounded():
     """_position_offsets_cache should have a max size with eviction."""
     from src.data import StreamingBinpackDataset
     ds = StreamingBinpackDataset.__new__(StreamingBinpackDataset)
+    ds._position_lock = threading.Lock()
+    ds._loader_lock = threading.Lock()
     ds._position_offsets_cache = {}
     ds._max_position_cache = 16
     assert hasattr(ds, '_max_position_cache')
@@ -116,10 +122,81 @@ def test_bug17_run_config_override():
     print("PASS: Bug 17 - run.py override handles non-dict intermediate")
 
 
+# --- Bug 20: cli.py signal handler trainer.should_stop protected ---
+def test_bug20_cli_signal_handler_protected():
+    """cli.py signal handler should wrap trainer.should_stop in try/except."""
+    import inspect
+    source = inspect.getsource(__import__('src.cli', fromlist=['run_smoke_test']).run_smoke_test)
+    # Check that trainer.should_stop = True is inside a try block
+    lines = source.split('\n')
+    should_stop_lines = [i for i, l in enumerate(lines) if 'trainer.should_stop = True' in l]
+    for sl in should_stop_lines:
+        # Look backwards for a try: before this line
+        found_try = False
+        for i in range(sl - 1, max(0, sl - 10), -1):
+            if lines[i].strip().startswith('try:'):
+                found_try = True
+                break
+        assert found_try, f"trainer.should_stop at line {sl} not in try/except"
+    print("PASS: Bug 20 - cli.py signal handler trainer.should_stop protected")
+
+
+# --- Bug 21: run.py signal handler trainer.should_stop protected ---
+def test_bug21_run_signal_handler_protected():
+    """run.py signal handler should wrap trainer.should_stop in try/except."""
+    import inspect
+    source = inspect.getsource(__import__('run', fromlist=['main']).main)
+    lines = source.split('\n')
+    should_stop_lines = [i for i, l in enumerate(lines) if 'trainer.should_stop = True' in l]
+    for sl in should_stop_lines:
+        found_try = False
+        for i in range(sl - 1, max(0, sl - 10), -1):
+            if lines[i].strip().startswith('try:'):
+                found_try = True
+                break
+        assert found_try, f"trainer.should_stop at line {sl} not in try/except"
+    print("PASS: Bug 21 - run.py signal handler trainer.should_stop protected")
+
+
+# --- Bug 22: data.py _file_loaders lock protection ---
+def test_bug22_file_loaders_lock():
+    """_iterate_cpp_loader should use _loader_lock for _file_loaders access."""
+    import inspect
+    source = inspect.getsource(StreamingBinpackDataset._iterate_cpp_loader)
+    assert "_loader_lock" in source, "_file_loaders access should be protected by _loader_lock"
+    print("PASS: Bug 22 - _file_loaders dict access protected by _loader_lock")
+
+
+# --- Bug 23: data.py _position_offsets_cache lock protection ---
+def test_bug23_position_cache_lock():
+    """_get_position_offset should use _position_lock for cache access."""
+    import inspect
+    source = inspect.getsource(StreamingBinpackDataset._get_position_offset)
+    assert "_position_lock" in source, "_position_offsets_cache access should be protected by _position_lock"
+    print("PASS: Bug 23 - _position_offsets_cache access protected by _position_lock")
+
+
+# --- Bug 24: train.py on_load_checkpoint stores _lambda_rng_state ---
+def test_bug24_lambda_rng_stored():
+    """on_load_checkpoint should store _lambda_rng_state for setup() safety."""
+    import inspect
+    source = inspect.getsource(
+        __import__('src.train', fromlist=['NNUELightningModule']).NNUELightningModule.on_load_checkpoint
+    )
+    assert "_lambda_rng_state = _lambda_rng_state" in source, \
+        "_lambda_rng_state should be stored for setup() safety"
+    print("PASS: Bug 24 - _lambda_rng_state stored in on_load_checkpoint")
+
+
 if __name__ == "__main__":
     test_bug13_position_offset_out_of_range()
     test_bug14_file_handle_eviction()
     test_bug15_cache_bounded()
     test_bug16_lambda_rng_applied()
     test_bug17_run_config_override()
+    test_bug20_cli_signal_handler_protected()
+    test_bug21_run_signal_handler_protected()
+    test_bug22_file_loaders_lock()
+    test_bug23_position_cache_lock()
+    test_bug24_lambda_rng_stored()
     print("\nALL NEW BUG TESTS PASSED!")

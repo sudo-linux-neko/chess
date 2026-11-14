@@ -112,6 +112,7 @@ class StreamingBinpackDataset(IterableDataset):
         self._resume_start_position = start_position
         self._rng = random.Random(seed)
         self._position_lock = threading.Lock()
+        self._loader_lock = threading.Lock()  # Protects _file_loaders dict
         self._file_loaders: Dict[int, Any] = {}
         self._max_cached_loaders = 8  # Limit open file handles
         self._position_offsets_cache: Dict[Path, List[int]] = {}
@@ -121,15 +122,17 @@ class StreamingBinpackDataset(IterableDataset):
         self._resume_consumed = False
 
     def __getstate__(self):
-        """Exclude non-picklable threading lock from serialization."""
+        """Exclude non-picklable threading locks from serialization."""
         state = self.__dict__.copy()
         state.pop('_position_lock', None)
+        state.pop('_loader_lock', None)
         return state
 
     def __setstate__(self, state):
-        """Restore non-picklable threading lock after deserialization."""
+        """Restore non-picklable threading locks after deserialization."""
         self.__dict__.update(state)
         self._position_lock = threading.Lock()
+        self._loader_lock = threading.Lock()
 
     def _discover_files(self) -> List[Path]:
         """Find all .binpack files in data_dir, sorted by priority source."""
@@ -221,25 +224,26 @@ class StreamingBinpackDataset(IterableDataset):
 
     def _iterate_cpp_loader(self, filepath: Path, file_idx: int, rng: random.Random):
         # Get or create loader (reuse across epochs) with cache size limit
-        if file_idx not in self._file_loaders:
-            # Evict oldest if cache full
-            if len(self._file_loaders) >= self._max_cached_loaders:
-                oldest_idx = next(iter(self._file_loaders))
-                oldest_ds = self._file_loaders.pop(oldest_idx)
-                # Close the dataset to release file handles
+        with self._loader_lock:
+            if file_idx not in self._file_loaders:
+                # Evict oldest if cache full
+                if len(self._file_loaders) >= self._max_cached_loaders:
+                    oldest_idx = next(iter(self._file_loaders))
+                    oldest_ds = self._file_loaders.pop(oldest_idx)
+                    # Close the dataset to release file handles
+                    try:
+                        if hasattr(oldest_ds, 'close'):
+                            oldest_ds.close()
+                    except Exception:
+                        pass
                 try:
-                    if hasattr(oldest_ds, 'close'):
-                        oldest_ds.close()
-                except Exception:
-                    pass
-            try:
-                self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
-            except Exception as e:
-                print(f"Failed to load {filepath} with C++ loader: {e}")
-                # Fall back to Python
-                yield from self._iterate_python_fallback(filepath, file_idx, rng)
-                return
-        dataset = self._file_loaders[file_idx]
+                    self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
+                except Exception as e:
+                    print(f"Failed to load {filepath} with C++ loader: {e}")
+                    # Fall back to Python
+                    yield from self._iterate_python_fallback(filepath, file_idx, rng)
+                    return
+            dataset = self._file_loaders[file_idx]
         num_positions = len(dataset)
 
         # Read resume position atomically - current_position/current_file_idx
@@ -362,37 +366,38 @@ class StreamingBinpackDataset(IterableDataset):
 
     def _get_position_offset(self, filepath: Path, idx: int) -> int:
         """Get exact byte offset for a position by building index on first call."""
-        # Evict oldest if cache full
-        if len(self._position_offsets_cache) >= self._max_position_cache:
-            oldest_path = next(iter(self._position_offsets_cache))
-            del self._position_offsets_cache[oldest_path]
-        
-        if filepath not in self._position_offsets_cache:
-            offsets = []
-            with open(filepath, 'rb') as f:
-                # Skip header
-                f.read(4)  # magic
-                f.read(4)  # version
-                f.read(8)  # num_positions
-                
-                pos = f.tell()
-                while True:
-                    offsets.append(pos)
-                    # Try to read next position header
-                    num_features_bytes = f.read(2)
-                    if not num_features_bytes or len(num_features_bytes) < 2:
-                        break
-                    num_features = struct.unpack("<H", num_features_bytes)[0]
-                    # Skip position data: features (2 bytes each) + weights (4 bytes each) + wdl (12) + eval (4) + game_result (1)
-                    pos += 2 + num_features * 6 + 17  # num_features + features + weights + wdl + eval + game_result
-                    f.seek(pos)
-            
-            self._position_offsets_cache[filepath] = offsets
-        
-        offsets = self._position_offsets_cache[filepath]
-        if idx < len(offsets):
-            return offsets[idx]
-        raise IndexError(f"Position index {idx} out of range for {filepath} (max: {len(offsets) - 1})")
+        with self._position_lock:
+            # Evict oldest if cache full
+            if len(self._position_offsets_cache) >= self._max_position_cache:
+                oldest_path = next(iter(self._position_offsets_cache))
+                del self._position_offsets_cache[oldest_path]
+
+            if filepath not in self._position_offsets_cache:
+                offsets = []
+                with open(filepath, 'rb') as f:
+                    # Skip header
+                    f.read(4)  # magic
+                    f.read(4)  # version
+                    f.read(8)  # num_positions
+
+                    pos = f.tell()
+                    while True:
+                        offsets.append(pos)
+                        # Try to read next position header
+                        num_features_bytes = f.read(2)
+                        if not num_features_bytes or len(num_features_bytes) < 2:
+                            break
+                        num_features = struct.unpack("<H", num_features_bytes)[0]
+                        # Skip position data: features (2 bytes each) + weights (4 bytes each) + wdl (12) + eval (4) + game_result (1)
+                        pos += 2 + num_features * 6 + 17  # num_features + features + weights + wdl + eval + game_result
+                        f.seek(pos)
+
+                self._position_offsets_cache[filepath] = offsets
+
+            offsets = self._position_offsets_cache[filepath]
+            if idx < len(offsets):
+                return offsets[idx]
+            raise IndexError(f"Position index {idx} out of range for {filepath} (max: {len(offsets) - 1})")
 
     def _read_position(self, f) -> tuple:
         num_features = struct.unpack("<H", f.read(2))[0]

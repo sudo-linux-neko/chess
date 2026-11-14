@@ -937,6 +937,8 @@ class NNUELightningModule(pl.LightningModule):
         # Restore lambda jitter RNG state for exact continuity across resume.
         # NOTE: applied directly here (not deferred to setup()) because PL calls
         # setup() BEFORE on_load_checkpoint(), so deferring would never restore.
+        # We also store it in _lambda_rng_state so setup() won't overwrite it
+        # if setup() runs after on_load_checkpoint().
         data_state = checkpoint.get("data_state", {})
         _lambda_rng_state = data_state.get("_lambda_rng") if isinstance(data_state, dict) else None
         if _lambda_rng_state is not None:
@@ -949,6 +951,7 @@ class NNUELightningModule(pl.LightningModule):
                 except Exception:
                     rank = 0
                 self._lambda_rng.manual_seed(self.config.get("seed", 42) + rank * 10000)
+            self._lambda_rng_state = _lambda_rng_state
         
         # Load EMA state (checkpoint_manager.save_checkpoint uses "ema_model" key,
         # PL's on_save_checkpoint uses "ema_state_dict" key - support both)
