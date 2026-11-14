@@ -305,6 +305,17 @@ class HFUploader:
                 logger.info(f"Uploaded: {task.remote_path} ({task.file_size/1024/1024:.1f} MB)")
                 return
 
+            except FileNotFoundError as e:
+                # File was deleted (e.g., by disk cleanup) before upload.
+                # Retrying won't help - mark as failed immediately to avoid
+                # wasting retry budget on a permanently-missing file.
+                task.error = str(e)
+                task.status = UploadStatus.FAILED
+                with self._lock:
+                    self._stats["failed"] += 1
+                logger.error(f"Upload failed permanently (file deleted): {task.remote_path} - {e}")
+                return
+
             except Exception as e:
                 task.error = str(e)
                 logger.warning(f"Upload attempt {attempt+1}/{task.max_retries+1} failed for {task.remote_path}: {e}")

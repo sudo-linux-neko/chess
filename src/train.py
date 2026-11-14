@@ -1085,7 +1085,9 @@ class OverfittingCallback(Callback):
         # If already overfitting and remediation exhausted, stop
         if self.overfitting_detected and self.remediation_attempts >= self.max_remediation_attempts:
             if not self.remediation_successful:
-                self.worse_count += 1
+                # NOTE: worse_count was already incremented on line ~1043 for this
+                # same validation check (val_loss >= best_val_loss). Do NOT
+                # double-increment here, or early stop triggers twice as fast.
                 if self.worse_count >= self.patience:
                     print(f"\n\n🛑 AUTO-STOP: Overfitting not fixable after {self.remediation_attempts} remediation attempts")
                     print(f"   Best val loss: {self.best_val_loss:.4f} (restoring best model)")
