@@ -838,7 +838,7 @@ def run_export_only(config: dict) -> int:
     if config.get("export", {}).get("verify", True):
         try:
             result = exporter.verify_export(model, nnue_path, test_data)
-            if not result["verified"]:
+            if not result.get("verified", False):
                 print("Export verification failed!")
                 return 1
         except Exception as e:
