@@ -32,11 +32,11 @@ import argparse
 import shutil
 from pathlib import Path
 
-# Add src to path
-SRC_DIR = Path(__file__).parent / "src"
+# Add project root to path so `from src.xxx` imports resolve correctly
+SRC_DIR = Path(__file__).parent
 sys.path.insert(0, str(SRC_DIR))
 # Add cpp_loader dir for direct import of compiled C++ loader
-CPP_LOADER_DIR = SRC_DIR / "cpp_loader"
+CPP_LOADER_DIR = SRC_DIR / "src" / "cpp_loader"
 if CPP_LOADER_DIR.exists():
     sys.path.insert(0, str(CPP_LOADER_DIR))
 

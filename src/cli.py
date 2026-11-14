@@ -28,8 +28,8 @@ from pathlib import Path
 import torch
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add project root to path so `from src.xxx` imports resolve correctly
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model import create_model
 from src.data import (create_dataloader, compile_cpp_loader, download_training_data, 
