@@ -314,6 +314,22 @@ class ExportVerifier:
                     (hidden2, output_dim),              # Out: hidden2 -> output_dim
                 ]
                 
+                # Detect format: quantized has int8 weights + float32 scales + int32 bias,
+                # float has float32 weights + float32 bias (no scales).
+                # Compute expected total file size for both formats across ALL layers,
+                # since trying quantized first would always succeed on float files
+                # (there are always enough bytes to read).
+                header_size = 4 + 4 + 32 + 32  # magic + version + feature_hash + network_hash
+                layer_overhead = 8  # in_features + out_features per layer
+                quantized_total = header_size
+                float_total = header_size
+                for _, (exp_in, exp_out) in zip(layer_names, expected_dims):
+                    quantized_total += layer_overhead + exp_out * exp_in + exp_out * 4 + exp_out * 4
+                    float_total += layer_overhead + exp_out * exp_in * 4 + exp_out * 4
+                
+                actual_size = nnue_path.stat().st_size
+                use_quantized = abs(actual_size - quantized_total) <= abs(actual_size - float_total)
+                
                 for i, (name, (exp_in, exp_out)) in enumerate(zip(layer_names, expected_dims)):
                     in_features = struct.unpack("<I", f.read(4))[0]
                     out_features = struct.unpack("<I", f.read(4))[0]
@@ -322,22 +338,6 @@ class ExportVerifier:
                         results["warnings"].append(
                             f"Layer {name} dims: expected ({exp_in}, {exp_out}), got ({in_features}, {out_features})"
                         )
-                    
-                    # Detect format: quantized has int8 weights + float32 scales + int32 bias,
-                    # float has float32 weights + float32 bias (no scales).
-                    # Compute expected total file size for both formats and use the match,
-                    # since trying quantized first would always succeed on float files
-                    # (there are always enough bytes to read).
-                    header_size = 4 + 4 + 32 + 32  # magic + version + feature_hash + network_hash
-                    layer_overhead = 8  # in_features + out_features per layer
-                    quantized_total = header_size
-                    float_total = header_size
-                    for _, (exp_in, exp_out) in zip(layer_names, expected_dims):
-                        quantized_total += layer_overhead + exp_out * exp_in + exp_out * 4 + exp_out * 4
-                        float_total += layer_overhead + exp_out * exp_in * 4 + exp_out * 4
-                    
-                    actual_size = nnue_path.stat().st_size
-                    use_quantized = abs(actual_size - quantized_total) <= abs(actual_size - float_total)
                     
                     pos_before = f.tell()
                     
