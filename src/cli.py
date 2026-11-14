@@ -760,7 +760,10 @@ def run_training(config: dict) -> int:
 
     test_data = None
     try:
-        test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
+        # Don't pass streaming_manager for test data - we don't need
+        # predictive prefetching for export calibration, and waiting
+        # for streaming files can hang for up to 120 seconds.
+        test_loader = create_dataloader(config, is_train=False)
         test_batch = next(iter(test_loader), None)
         if test_batch is None:
             raise StopIteration("empty dataloader")
