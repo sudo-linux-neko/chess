@@ -355,7 +355,7 @@ class FakeHFUploader:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self._queue = []
-        self._stats = {"uploaded": 0, "failed": 0, "bytes_uploaded": 0}
+        self._stats = {"uploaded": 0, "failed": 0, "bytes_uploaded": 0, "start_time": time.time()}
 
     def start(self):
         pass
