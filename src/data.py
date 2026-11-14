@@ -456,6 +456,10 @@ class StreamingBinpackDataset(IterableDataset):
     def set_state(self, state: Dict[str, Any]):
         self.current_file_idx = state.get("current_file_idx", 0)
         self.current_position = state.get("current_position", 0)
+        # Also set resume start position so __iter__ picks it up on next call
+        self._resume_start_file = state.get("current_file_idx", 0)
+        self._resume_start_position = state.get("current_position", 0)
+        self._resume_consumed = False  # Reset so resume is consumed on next __iter__
         self.seed = state.get("seed", self.seed)
         self._rng = random.Random(self.seed)
 
@@ -1605,6 +1609,11 @@ def create_dataloader(
                 if dataset.current_file_idx >= len(active_files):
                     dataset.current_file_idx = max(0, len(active_files) - 1)
                     dataset.current_position = 0
+                    # Also clear resume start position so __iter__ doesn't keep
+                    # trying to resume from an out-of-range file every epoch
+                    dataset._resume_start_file = 0
+                    dataset._resume_start_position = 0
+                    dataset._resume_consumed = True
                 print(f"Streaming mode: using {len(active_files)} active files ({streaming_manager._get_active_size_gb():.1f}GB)")
         else:
             # Non-streaming: check for existing data files first
