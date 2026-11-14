@@ -830,15 +830,7 @@ class StreamingDataManager:
             # Create symlink at data_dir/filename for consistent path tracking
             # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
             # but _discover_all_files uses data_dir/<filename>, so we symlink
-            link_path = self.data_dir / filepath.name
-            try:
-                # Remove existing link/file if it's broken or wrong
-                if link_path.exists() or link_path.is_symlink():
-                    link_path.unlink(missing_ok=True)
-                link_path.symlink_to(actual_path)
-            except Exception:
-                # Symlinks not supported, use actual path
-                link_path = actual_path
+            link_path = _create_data_symlink(self.data_dir, filepath.name, actual_path)
             
             with self._lock:
                 self._downloaded_files.add(link_path)
@@ -1078,14 +1070,6 @@ class StreamingDataManager:
         else:
             return 30  # Normal: check every 30s
     
-    def register_file_access(self, filepath: Path):
-        """Mark file as recently used (updates mtime for LRU)."""
-        if filepath.exists():
-            try:
-                os.utime(filepath, None)
-            except Exception:
-                pass
-    
     def register_batch_consumed(self, filepath: Path, num_positions: int):
         """Register that a batch was consumed from a file for rate tracking."""
         with self._lock:
@@ -1165,9 +1149,6 @@ def download_training_data(
         if source.type == "huggingface":
             files = _download_from_hf(source, data_dir, max_data_gb, max_files - len(downloaded_files))
             downloaded_files.extend(files)
-        elif source.type == "http":
-            files = _download_from_http(source, data_dir, max_data_gb, max_files - len(downloaded_files))
-            downloaded_files.extend(files)
         elif source.type == "local":
             files = _copy_from_local(source, data_dir, max_files - len(downloaded_files))
             downloaded_files.extend(files)
@@ -1182,6 +1163,24 @@ def download_training_data(
     import fnmatch
     downloaded_files.sort(key=lambda f: next((s.priority for s in data_sources if fnmatch.fnmatch(f.name, s.pattern)), 999))
     return downloaded_files
+
+
+def _create_data_symlink(data_dir: Path, filename: str, actual_path: Path) -> Path:
+    """Create symlink at data_dir/filename pointing to actual_path.
+    
+    hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
+    but callers use data_dir.glob("*.binpack") which expects data_dir/<filename>.
+    Falls back to actual_path if symlinks are not supported.
+    """
+    link_path = data_dir / filename
+    try:
+        if link_path.exists() or link_path.is_symlink():
+            link_path.unlink(missing_ok=True)
+        link_path.symlink_to(actual_path)
+    except Exception:
+        # Symlinks not supported, use actual path
+        link_path = actual_path
+    return link_path
 
 
 def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
@@ -1268,15 +1267,7 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                     # Create symlink at data_dir/filename for consistent path tracking
                     # hf_hub_download with local_dir stores at data_dir/<repo_id>/<filename>
                     # but callers use data_dir.glob("*.binpack") which expects data_dir/<filename>
-                    link_path = data_dir / filename
-                    try:
-                        # Remove existing link/file if it's broken or wrong
-                        if link_path.exists() or link_path.is_symlink():
-                            link_path.unlink(missing_ok=True)
-                        link_path.symlink_to(actual_path)
-                    except Exception:
-                        # Symlinks not supported, use actual path
-                        link_path = actual_path
+                    link_path = _create_data_symlink(data_dir, filename, actual_path)
                     
                     downloaded.append(link_path)
                     file_size = actual_path.stat().st_size
@@ -1299,11 +1290,6 @@ def _download_from_hf(source: DataSource, data_dir: Path, max_data_gb: float, ma
                 print(f"HF download failed after {max_retries} attempts: {e}")
                 return []
     
-    return []
-
-
-def _download_from_http(source: DataSource, data_dir: Path, max_data_gb: float, max_files: int) -> List[Path]:
-    print(f"HTTP download from {source.repo_id} not fully implemented")
     return []
 
 

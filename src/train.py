@@ -784,6 +784,11 @@ class NNUELightningModule(pl.LightningModule):
         # Use fused AdamW if available (CUDA only, faster).
         # Fused optimizers don't support gradient clipping in PyTorch Lightning,
         # so disable fused when gradient clipping is configured.
+        #
+        # IMPORTANT: Exclude ema_model submodule parameters from the optimizer.
+        # ema_model is registered as a submodule of NNUEModel, so self.model.parameters()
+        # would include EMA params, which would bloat checkpoints with optimizer state
+        # for EMA params and could corrupt EMA if requires_grad ever changes.
         optimizer_kwargs = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -792,22 +797,31 @@ class NNUELightningModule(pl.LightningModule):
         }
         grad_clip = self.config.get("training", {}).get("gradient_clip_val", 0.0)
         use_fused = torch.cuda.is_available() and grad_clip == 0.0
+
+        # Get model parameters excluding EMA submodule (same filtering as update_ema)
+        def _get_trainable_params():
+            params = []
+            for name, param in self.model.named_parameters(recurse=True):
+                if not name.startswith('ema_model.'):
+                    params.append(param)
+            return params
+
         if use_fused:
             try:
                 optimizer = torch.optim.AdamW(
-                    self.model.parameters(),
+                    _get_trainable_params(),
                     fused=True,
                     **optimizer_kwargs,
                 )
             except (TypeError, RuntimeError, ValueError):
                 # fused not supported (CPU or older PyTorch/CUDA)
                 optimizer = torch.optim.AdamW(
-                    self.model.parameters(),
+                    _get_trainable_params(),
                     **optimizer_kwargs,
                 )
         else:
             optimizer = torch.optim.AdamW(
-                self.model.parameters(),
+                _get_trainable_params(),
                 **optimizer_kwargs,
             )
         
