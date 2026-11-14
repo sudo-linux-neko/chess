@@ -214,9 +214,8 @@ class NNUEExporter:
             # Original output
             orig_out = layer_cpu(cal).numpy()
             
-            # Quantized output (Stockfish-compatible: bias added directly, not scaled)
-            quant_out = cal.numpy() @ weight_q.T.astype(np.float32) * scales
-            quant_out += bias_q.astype(np.float32)
+            # Quantized output (Stockfish-compatible: (dot + bias_q) * scale)
+            quant_out = (cal.numpy() @ weight_q.T.astype(np.float32) + bias_q.astype(np.float32)) * scales
             
             # Apply ClippedReLU for hidden layers
             if name in ["feature_transformer", "hidden1", "hidden2"]:
