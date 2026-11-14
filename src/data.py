@@ -105,6 +105,11 @@ class StreamingBinpackDataset(IterableDataset):
         self.files = self._discover_files()
         self.current_file_idx = start_file
         self.current_position = start_position
+        # Preserve the constructor resume position separately — current_file_idx/
+        # current_position get mutated during iteration, so on the next __iter__()
+        # call they'd be at end-of-epoch and misinterpreted as a resume position.
+        self._resume_start_file = start_file
+        self._resume_start_position = start_position
         self._rng = random.Random(seed)
         self._position_lock = threading.Lock()
         self._file_loaders: Dict[int, Any] = {}
@@ -163,9 +168,11 @@ class StreamingBinpackDataset(IterableDataset):
         worker_files = rank_files[start_idx:end_idx]
         worker_start_idx = start_idx  # index into rank_files
 
-        # Handle resume: map global current_file_idx to rank-local index
-        resume_file = self.current_file_idx
-        resume_pos = self.current_position
+        # Handle resume: use constructor start_file/start_position (preserved
+        # separately since current_file_idx/current_position get mutated during
+        # iteration and would be at end-of-epoch on the next __iter__ call).
+        resume_file = self._resume_start_file
+        resume_pos = self._resume_start_position
         _resume_consumed = getattr(self, '_resume_consumed', False)
 
         if not _resume_consumed and (resume_file > 0 or resume_pos > 0):
@@ -181,6 +188,9 @@ class StreamingBinpackDataset(IterableDataset):
                     worker_files = remaining[rem_start:rem_end]
                     worker_start_idx = resume_local + rem_start
             self._resume_consumed = True
+            # Clear consumed resume position so subsequent epochs start fresh
+            self._resume_start_file = 0
+            self._resume_start_position = 0
         else:
             # Not resuming - reset position for fresh start
             self.current_file_idx = 0
