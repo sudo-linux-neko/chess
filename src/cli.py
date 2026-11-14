@@ -810,7 +810,9 @@ def run_export_only(config: dict) -> int:
     test_data = None
     try:
         test_loader = create_dataloader(config, is_train=False)
-        test_batch = next(iter(test_loader))
+        test_batch = next(iter(test_loader), None)
+        if test_batch is None:
+            raise StopIteration("empty dataloader")
         test_data = test_batch["features"][:100]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")
