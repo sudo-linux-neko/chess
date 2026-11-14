@@ -934,11 +934,21 @@ class NNUELightningModule(pl.LightningModule):
             # Track samples seen at resume for correct data position estimation
             self._samples_seen_at_resume = ts.get("samples_seen", 0)
         
-        # Restore lambda jitter RNG state for exact continuity across resume
+        # Restore lambda jitter RNG state for exact continuity across resume.
+        # NOTE: applied directly here (not deferred to setup()) because PL calls
+        # setup() BEFORE on_load_checkpoint(), so deferring would never restore.
         data_state = checkpoint.get("data_state", {})
         _lambda_rng_state = data_state.get("_lambda_rng") if isinstance(data_state, dict) else None
         if _lambda_rng_state is not None:
-            self._lambda_rng_state = _lambda_rng_state
+            try:
+                self._lambda_rng.set_state(_lambda_rng_state)
+            except Exception:
+                # Fallback: reseed per-rank
+                try:
+                    rank = self.trainer.global_rank
+                except Exception:
+                    rank = 0
+                self._lambda_rng.manual_seed(self.config.get("seed", 42) + rank * 10000)
         
         # Load EMA state (checkpoint_manager.save_checkpoint uses "ema_model" key,
         # PL's on_save_checkpoint uses "ema_state_dict" key - support both)

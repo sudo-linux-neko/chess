@@ -139,7 +139,12 @@ def main():
             keys = key.split('.')
             cfg = config
             for k in keys[:-1]:
-                cfg = cfg.setdefault(k, {})
+                existing = cfg.get(k)
+                if not isinstance(existing, dict):
+                    # Overwrite non-dict intermediates so override path is navigable
+                    existing = {}
+                    cfg[k] = existing
+                cfg = existing
             cfg[keys[-1]] = value
 
     config["config_path"] = config_path

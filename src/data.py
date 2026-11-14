@@ -114,6 +114,8 @@ class StreamingBinpackDataset(IterableDataset):
         self._position_lock = threading.Lock()
         self._file_loaders: Dict[int, Any] = {}
         self._max_cached_loaders = 8  # Limit open file handles
+        self._position_offsets_cache: Dict[Path, List[int]] = {}
+        self._max_position_cache = 16  # Limit cached position index sizes
         # Track whether resume state has been consumed (prevents epoch 2+
         # from incorrectly using end-of-epoch-1 position as start position)
         self._resume_consumed = False
@@ -223,7 +225,13 @@ class StreamingBinpackDataset(IterableDataset):
             # Evict oldest if cache full
             if len(self._file_loaders) >= self._max_cached_loaders:
                 oldest_idx = next(iter(self._file_loaders))
-                del self._file_loaders[oldest_idx]
+                oldest_ds = self._file_loaders.pop(oldest_idx)
+                # Close the dataset to release file handles
+                try:
+                    if hasattr(oldest_ds, 'close'):
+                        oldest_ds.close()
+                except Exception:
+                    pass
             try:
                 self._file_loaders[file_idx] = CppBinpackDataset(str(filepath))
             except Exception as e:
@@ -354,8 +362,10 @@ class StreamingBinpackDataset(IterableDataset):
 
     def _get_position_offset(self, filepath: Path, idx: int) -> int:
         """Get exact byte offset for a position by building index on first call."""
-        if not hasattr(self, '_position_offsets_cache'):
-            self._position_offsets_cache = {}
+        # Evict oldest if cache full
+        if len(self._position_offsets_cache) >= self._max_position_cache:
+            oldest_path = next(iter(self._position_offsets_cache))
+            del self._position_offsets_cache[oldest_path]
         
         if filepath not in self._position_offsets_cache:
             offsets = []
@@ -382,7 +392,7 @@ class StreamingBinpackDataset(IterableDataset):
         offsets = self._position_offsets_cache[filepath]
         if idx < len(offsets):
             return offsets[idx]
-        return 0
+        raise IndexError(f"Position index {idx} out of range for {filepath} (max: {len(offsets) - 1})")
 
     def _read_position(self, f) -> tuple:
         num_features = struct.unpack("<H", f.read(2))[0]
