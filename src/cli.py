@@ -365,7 +365,7 @@ def run_smoke_test(config: dict) -> int:
     if nnue_path:
         try:
             result = exporter.verify_export(pl_module.model, nnue_path, test_data)
-            print(f"Verification: {'PASSED' if result['verified'] else 'FAILED'}")
+            print(f"Verification: {'PASSED' if result.get('verified', False) else 'FAILED'}")
         except Exception as e:
             print(f"Verification error (expected for smoke test): {e}")
 
@@ -901,7 +901,7 @@ def run_verify_export(config: dict) -> int:
         print(f"Export verification error: {e}")
         return 1
 
-    return 0 if result["verified"] else 1
+    return 0 if result.get("verified", False) else 1
 
 
 def main():
