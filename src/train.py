@@ -578,6 +578,11 @@ class NNUELightningModule(pl.LightningModule):
         Dataset position updates happen in worker processes (separate memory space
         with spawn multiprocessing) and never propagate to main process. We estimate
         position from samples_seen using positions-per-file from the first file.
+        
+        Under DDP with stride sharding (files[rank::world_size]), each rank processes
+        a disjoint subset of files. Each rank tracks its own samples_seen, and we
+        convert per-rank samples to global file index by:
+          global_file = base_file + rank + shard_files_completed * world_size
         """
         dataset = getattr(self, 'train_dataset', None)
         if dataset is None or not hasattr(dataset, 'files') or len(dataset.files) == 0:
@@ -604,25 +609,18 @@ class NNUELightningModule(pl.LightningModule):
         if ppf <= 0:
             return
         
-        # Convert per-rank samples_seen to global samples consumed across all ranks.
-        # samples_seen is incremented per-rank (micro_batch_size * accum_steps per
-        # optimizer step on each rank). Under DDP, each rank processes a disjoint
-        # shard (files[rank::world_size]), so global samples = per-rank * world_size.
+        rank = int(os.environ.get("RANK", "0"))
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         
         num_files = len(dataset.files)
-        total_samples = self.training_state.samples_seen * world_size
         
-        # Estimate position relative to resume start to avoid counting
-        # pre-resume samples toward post-resume position. Both are per-rank,
-        # convert to global by multiplying by world_size.
-        samples_since_resume = (total_samples - self._samples_seen_at_resume * world_size)
+        # Per-rank samples since resume (each rank tracks its own samples_seen).
+        # Do NOT multiply by world_size - each rank processes its own shard
+        # independently, so per-rank samples map directly to per-rank file progress.
+        samples_since_resume = self.training_state.samples_seen - self._samples_seen_at_resume
         if samples_since_resume < 0:
             samples_since_resume = 0
         
-        # Estimate which file and position within file
-        # Correctly account for base_position: only the first (resume-start) file
-        # has a non-zero base_position; subsequent files start at position 0.
         base_file = getattr(self, '_resume_start_file', 0)
         base_position = getattr(self, '_resume_start_position', 0)
         samples_remaining_in_first_file = ppf - base_position
@@ -636,8 +634,13 @@ class NNUELightningModule(pl.LightningModule):
             files_completed = 1 + (remaining // ppf)
             position_in_file = remaining % ppf
         
-        # Offset by the resume start file
-        self.training_state.current_file_idx = min(base_file + files_completed, num_files - 1)
+        # Convert per-rank shard position to global file index.
+        # Each rank processes files[rank::world_size], so `files_completed` shard files
+        # advances the global index by files_completed * world_size. Add rank offset
+        # so each rank starts at its correct stride position.
+        global_file_idx = base_file + rank + files_completed * world_size
+        
+        self.training_state.current_file_idx = min(global_file_idx, num_files - 1)
         self.training_state.current_position = min(position_in_file, ppf - 1)
 
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
