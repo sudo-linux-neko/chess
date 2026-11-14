@@ -40,9 +40,9 @@ class QuantizedLayer:
         return self.weight.shape[0]
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        """Quantized inference: (x @ W_q.T) * scale + bias_q (Convention A)."""
+        """Quantized inference: (dot + bias_q) * scale (Convention A, matches Rust)."""
         x_f = x.astype(np.float32)
-        return (x_f @ self.weight.T.astype(np.float32)) * self.scale + self.bias.astype(np.float32)
+        return ((x_f @ self.weight.T.astype(np.float32)) + self.bias.astype(np.float32)) * self.scale
 
 
 class ClippedReLUQuantized:
