@@ -405,12 +405,12 @@ def run_smoke_test(config: dict) -> int:
             verify_ok = False
 
     print("\n" + "=" * 60)
-    if export_ok:
+    if export_ok and verify_ok:
         print("SMOKE TEST PASSED - Pipeline verified end-to-end")
         print("=" * 60)
         return 0
     else:
-        print("SMOKE TEST FAILED - Export did not complete")
+        print("SMOKE TEST FAILED - Export or verification did not complete")
         print("=" * 60)
         return 1
 
