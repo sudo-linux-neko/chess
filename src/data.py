@@ -221,7 +221,10 @@ class StreamingBinpackDataset(IterableDataset):
         dataset = self._file_loaders[file_idx]
         num_positions = len(dataset)
 
-        start_pos = self.current_position if file_idx == self.current_file_idx else 0
+        # Read resume position atomically - current_position/current_file_idx
+        # are updated under _position_lock during iteration
+        with self._position_lock:
+            start_pos = self.current_position if file_idx == self.current_file_idx else 0
 
         # Curriculum: skip early game positions based on ply
         indices = list(range(start_pos, num_positions))

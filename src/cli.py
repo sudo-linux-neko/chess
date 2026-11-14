@@ -362,30 +362,58 @@ def run_smoke_test(config: dict) -> int:
                 print(f"  Upload warning: {e}")
 
     if hf_uploader:
-        hf_uploader.shutdown(wait=True)
+        try:
+            hf_uploader.shutdown(wait=True)
+        except Exception:
+            pass
 
     print("\n6. Testing export...")
     exporter = create_exporter(config)
-    test_data = torch.randn(10, config.get("model", {}).get("input_dim", 81920))
+    test_data = None
     nnue_path = None
+    export_ok = False
     try:
-        nnue_path = exporter.export(pl_module.model, calibration_data=None, use_ema=False)
+        # Use calibration data from dummy binpack for better quantization scales
+        cal_data = None
+        try:
+            from src.data import create_dataloader
+            cal_loader = create_dataloader(config, is_train=False)
+            cal_batch = next(iter(cal_loader), None)
+            if cal_batch is not None:
+                cal_data = cal_batch["features"][:100]
+        except Exception:
+            pass
+        if cal_data is None:
+            input_dim = config.get("model", {}).get("input_dim", 81920)
+            cal_data = torch.randn(100, input_dim)
+        test_data = cal_data
+        
+        nnue_path = exporter.export(pl_module.model, calibration_data=cal_data, use_ema=False)
         print(f"Exported: {nnue_path}")
+        export_ok = True
     except Exception as e:
-        print(f"Export error (expected for smoke test): {e}")
+        print(f"Export error: {e}")
 
     print("\n7. Testing verification...")
+    verify_ok = False
     if nnue_path:
         try:
             result = exporter.verify_export(pl_module.model, nnue_path, test_data)
-            print(f"Verification: {'PASSED' if result.get('verified', False) else 'FAILED'}")
+            verify_ok = result.get('verified', False)
+            print(f"Verification: {'PASSED' if verify_ok else 'FAILED'} (MAE={result.get('mean_abs_error_cp', 0):.6f}cp)")
         except Exception as e:
-            print(f"Verification error (expected for smoke test): {e}")
+            print(f"Verification error: {e}")
+            verify_ok = False
 
     print("\n" + "=" * 60)
-    print("SMOKE TEST PASSED - Pipeline verified end-to-end")
-    print("=" * 60)
-    return 0
+    if export_ok:
+        print("SMOKE TEST PASSED - Pipeline verified end-to-end")
+        print("=" * 60)
+        return 0
+    else:
+        print("SMOKE TEST FAILED - Export did not complete")
+        print("=" * 60)
+        return 1
 
 
 def run_training(config: dict) -> int:
