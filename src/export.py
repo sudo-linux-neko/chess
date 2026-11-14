@@ -144,16 +144,21 @@ class NNUEExporter:
         calibration_data: Optional[torch.Tensor],
     ) -> Dict[str, QuantizedLayer]:
         quantized = {}
+        batch_size = calibration_data.shape[0] if calibration_data is not None else 1
 
         with torch.no_grad():
-            # Feature transformer (shared weights)
-            ft_layer = model.feature_transformer.linear
-            quantized["feature_transformer"] = self._quantize_linear(
-                ft_layer, "feature_transformer", calibration_data
-            )
-            quantized["hidden1"] = self._quantize_linear(model.hidden1_linear, "hidden1", calibration_data)
-            quantized["hidden2"] = self._quantize_linear(model.hidden2_linear, "hidden2", calibration_data)
-            quantized["output"] = self._quantize_linear(model.output_layer, "output", calibration_data)
+            # Each layer needs its own correctly-shaped input:
+            # FT: 1280-dim per bucket, hidden1: 16384-dim accumulator,
+            # hidden2: 256-dim, output: 32-dim
+            layers_to_quantize = [
+                ("feature_transformer", model.feature_transformer.linear),
+                ("hidden1", model.hidden1_linear),
+                ("hidden2", model.hidden2_linear),
+                ("output", model.output_layer),
+            ]
+            for name, layer in layers_to_quantize:
+                dummy_input = torch.randn(batch_size, layer.in_features)
+                quantized[name] = self._quantize_linear(layer, name, dummy_input)
 
         return quantized
 
@@ -603,36 +608,36 @@ class NNUEExporter:
         batch_size = x.shape[0]
 
         ft = layers["feature_transformer"]
-        features_per_bucket = ft.weight.shape[1]   # 1280
-        ft_output = ft.weight.shape[0]             # 256
-        h1_in = layers["hidden1"].weight.shape[1]  # 16384
+        features_per_bucket = ft["weight"].shape[1]   # 1280
+        ft_output = ft["weight"].shape[0]             # 256
+        h1_in = layers["hidden1"]["weight"].shape[1]  # 16384
         num_buckets = h1_in // ft_output               # 64
 
         x = x.reshape(batch_size, num_buckets, features_per_bucket)
 
         # Feature transformer
         x_flat = x.reshape(-1, features_per_bucket)
-        acc = x_flat @ ft.weight.T
-        acc += ft.bias
+        acc = x_flat @ ft["weight"].T
+        acc += ft["bias"]
         x = acc.reshape(batch_size, num_buckets * ft_output)
         x = np.clip(x, 0, 1.0)
 
         # Hidden1
         h1 = layers["hidden1"]
-        acc = x @ h1.weight.T
-        acc += h1.bias
+        acc = x @ h1["weight"].T
+        acc += h1["bias"]
         x = np.clip(acc, 0, 1.0)
 
         # Hidden2
         h2 = layers["hidden2"]
-        acc = x @ h2.weight.T
-        acc += h2.bias
+        acc = x @ h2["weight"].T
+        acc += h2["bias"]
         x = np.clip(acc, 0, 1.0)
 
         # Output
         out = layers["output"]
-        acc = x @ out.weight.T
-        acc += out.bias
+        acc = x @ out["weight"].T
+        acc += out["bias"]
 
         return acc.squeeze(-1)
 
