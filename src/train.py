@@ -262,8 +262,15 @@ class NNUELightningModule(pl.LightningModule):
                 rank = self.trainer.global_rank
             except Exception:
                 rank = 0
-            _lambda_seed = self.config.get("seed", 42) + rank * 10000
-            self._lambda_rng.manual_seed(_lambda_seed)
+            # Restore saved RNG state from checkpoint if resuming (exact lambda jitter continuity)
+            _lambda_rng_state = getattr(self, '_lambda_rng_state', None)
+            if _lambda_rng_state is not None:
+                try:
+                    self._lambda_rng.set_state(_lambda_rng_state)
+                except Exception:
+                    self._lambda_rng.manual_seed(self.config.get("seed", 42) + rank * 10000)
+            else:
+                self._lambda_rng.manual_seed(self.config.get("seed", 42) + rank * 10000)
             self._lambda_rank_seeded = True
         
         # Enable TF32 for faster matmul on T4 (Ampere+)
@@ -541,6 +548,7 @@ class NNUELightningModule(pl.LightningModule):
                 training_state=self.training_state,
                 config=self.config,
                 ema_model=self.ema_model,  # Pass EMA model for checkpointing
+                data_state={"_lambda_rng": self._lambda_rng.get_state()},  # Preserve lambda jitter RNG across resume
             )
             if ckpt_path and self.hf_uploader:
                 try:

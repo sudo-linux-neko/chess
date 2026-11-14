@@ -264,7 +264,7 @@ if not CONFIG_PATH.exists():
             "repo_id": "",  # Auto-generated: {username}/chess-nnue
             "repo_name": "chess-nnue",
             "token_env": "HF_TOKEN",
-            "create_repo": True,
+            "auto_create_repo": True,
             "private": False,
             "upload_workers": 1,
             "max_retries": 5,

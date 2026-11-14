@@ -353,6 +353,10 @@ def run_full_training(config, is_kaggle):
             pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
             pl_module._resume_start_file = pl_module.training_state.current_file_idx
             pl_module._resume_start_position = pl_module.training_state.current_position
+            # Restore _lambda_rng state for exact lambda jitter continuity across resume
+            _lambda_rng_state = checkpoint_result.get("data_state", {}).get("_lambda_rng")
+            if _lambda_rng_state is not None:
+                pl_module._lambda_rng_state = _lambda_rng_state
             # Note: EMA model sync is deferred to on_train_start() because setup() hasn't
             # created pl_module.ema_model yet at this point (before trainer.fit()).
             print(f"  Resumed at step {pl_module.training_state.step}")

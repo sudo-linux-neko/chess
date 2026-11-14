@@ -500,6 +500,10 @@ def run_training(config: dict) -> int:
         pl_module._samples_seen_at_resume = pl_module.training_state.samples_seen
         pl_module._resume_start_file = pl_module.training_state.current_file_idx
         pl_module._resume_start_position = pl_module.training_state.current_position
+        # Restore _lambda_rng state for exact lambda jitter continuity across resume
+        _lambda_rng_state = checkpoint_result.get("data_state", {}).get("_lambda_rng")
+        if _lambda_rng_state is not None:
+            pl_module._lambda_rng_state = _lambda_rng_state
         # Note: EMA model sync is deferred to on_train_start() because setup() hasn't
         # created pl_module.ema_model yet at this point (before trainer.fit()).
 
@@ -765,7 +769,7 @@ def run_training(config: dict) -> int:
             # Verify against the same model that was exported
             verify_model = pl_module.ema_model if use_ema_export else pl_module.model
             result = exporter.verify_export(verify_model, nnue_path, test_data)
-            if not result['verified']:
+            if not result.get('verified', False):
                 print("WARNING: Export verification failed!")
         except Exception as e:
             print(f"Verification error: {e}")
@@ -880,6 +884,8 @@ def run_verify_export(config: dict) -> int:
     try:
         test_loader = create_dataloader(config, is_train=False)
         test_batch = next(iter(test_loader), None)
+        if test_batch is None:
+            raise StopIteration("empty dataloader")
         test_data = test_batch["features"][:config.get("export", {}).get("verify_samples", 20000)]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")
