@@ -261,11 +261,22 @@ def run_smoke_test(config: dict) -> int:
     # Override config for smoke test
     config.setdefault("smoke_test", {})["enabled"] = True
     config.setdefault("training", {})["batch_size"] = smoke_cfg.get("batch_size", 512)
-    config["training"]["max_positions"] = smoke_cfg.get("max_positions", 1000)
+    # micro_batch_size is what the DataLoader actually uses (batch_size is total effective)
+    config.setdefault("training", {})["micro_batch_size"] = smoke_cfg.get("micro_batch_size", 64)
+    config["training"]["max_positions"] = smoke_cfg.get("max_positions", 10000)
+    # Limit total steps so smoke test finishes quickly on CPU
+    # Use enough steps to avoid OneCycleLR division-by-zero with tiny warmup
+    smoke_total_steps = smoke_cfg.get("total_steps", 10)
+    config.setdefault("training", {}).setdefault("lr_schedule", {})["total_steps"] = smoke_total_steps
+    config.setdefault("training", {}).setdefault("lr_schedule", {})["max_lr"] = 0.0008
+    config.setdefault("training", {}).setdefault("lr_schedule", {})["warmup_pct"] = 0.0
+    config.setdefault("training", {}).setdefault("lr_schedule", {})["final_div"] = 10000.0
     config.setdefault("time_budget", {})["hours"] = smoke_cfg.get("time_budget_hours", 0.05)
     config["time_budget"]["checkpoint_interval_min"] = smoke_cfg.get("checkpoint_interval_min", 1)
     config.setdefault("hardware", {})["num_workers"] = smoke_cfg.get("num_workers", 0)
     config["hardware"]["compile_model"] = False
+    # Don't drop last batch in smoke test (small dataset)
+    config.setdefault("data", {})["drop_last_batch"] = False
     # Ensure wdl_lambda exists
     if "wdl_lambda" not in config.get("training", {}):
         config.setdefault("training", {})["wdl_lambda"] = 0.55

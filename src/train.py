@@ -454,6 +454,11 @@ class NNUELightningModule(pl.LightningModule):
         # Checkpointing
         self._maybe_checkpoint()
         
+        # Max positions check - stop training when enough positions processed
+        if self.max_positions and self.training_state.samples_seen >= self.max_positions:
+            print(f"\n  Max positions ({self.max_positions:,}) reached at step {self.training_state.step}, stopping training")
+            self.trainer.should_stop = True
+        
         # Time budget check
         if self._check_time_budget():
             self.trainer.should_stop = True
@@ -773,21 +778,31 @@ class NNUELightningModule(pl.LightningModule):
         eps = float(train_cfg.get("eps", 1e-8))
         
         # AdamW with factorized weight decay
-        # Use fused AdamW if available (CUDA only, faster)
+        # Use fused AdamW if available (CUDA only, faster).
+        # Fused optimizers don't support gradient clipping in PyTorch Lightning,
+        # so disable fused when gradient clipping is configured.
         optimizer_kwargs = {
             "lr": lr,
             "weight_decay": weight_decay,
             "betas": betas,
             "eps": eps,
         }
-        try:
-            optimizer = torch.optim.AdamW(
-                self.model.parameters(),
-                fused=True,
-                **optimizer_kwargs,
-            )
-        except (TypeError, RuntimeError, ValueError):
-            # fused not supported (CPU or older PyTorch/CUDA)
+        grad_clip = self.config.get("training", {}).get("gradient_clip_val", 0.0)
+        use_fused = torch.cuda.is_available() and grad_clip == 0.0
+        if use_fused:
+            try:
+                optimizer = torch.optim.AdamW(
+                    self.model.parameters(),
+                    fused=True,
+                    **optimizer_kwargs,
+                )
+            except (TypeError, RuntimeError, ValueError):
+                # fused not supported (CPU or older PyTorch/CUDA)
+                optimizer = torch.optim.AdamW(
+                    self.model.parameters(),
+                    **optimizer_kwargs,
+                )
+        else:
             optimizer = torch.optim.AdamW(
                 self.model.parameters(),
                 **optimizer_kwargs,

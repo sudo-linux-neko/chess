@@ -247,7 +247,12 @@ class NNUEModel(nn.Module):
         decay = decay or self.ema_decay
         with torch.no_grad():
             ema_params = list(self.ema_model.parameters())
-            params = list(self.parameters())
+            # Get model parameters EXCLUDING ema_model submodule (to avoid double-counting)
+            # since ema_model is a submodule of self, self.parameters() includes EMA params too
+            params = []
+            for name, param in self.named_parameters(recurse=True):
+                if not name.startswith('ema_model.'):
+                    params.append(param)
             assert len(ema_params) == len(params), f"EMA/model parameter count mismatch: {len(ema_params)} vs {len(params)}"
             for ema_param, param in zip(ema_params, params):
                 ema_param.mul_(decay).add_(param, alpha=1.0 - decay)
