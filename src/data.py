@@ -179,14 +179,24 @@ class StreamingBinpackDataset(IterableDataset):
             # Does the resume file belong to this rank?
             if world_size <= 1 or (resume_file - rank) % world_size == 0:
                 resume_local = (resume_file - rank) // world_size if world_size > 1 else resume_file
-                if 0 <= resume_local < len(rank_files):
-                    # Distribute remaining rank-local files from resume_local across workers
-                    remaining = rank_files[resume_local:]
-                    rem_per_worker = max(1, len(remaining) // num_workers)
-                    rem_start = worker_id * rem_per_worker
-                    rem_end = rem_start + rem_per_worker if worker_id < num_workers - 1 else len(remaining)
-                    worker_files = remaining[rem_start:rem_end]
-                    worker_start_idx = resume_local + rem_start
+                resume_local_pos = resume_pos
+            else:
+                # Resume file belongs to a different rank (only rank 0 saves checkpoints).
+                # Compute this rank's next file in its shard at or after resume_file.
+                # Ceiling division: first local index whose global file >= resume_file.
+                resume_local = (resume_file - rank + world_size - 1) // world_size if world_size > 1 else resume_file
+                resume_local_pos = 0  # Start at beginning of this new file
+            if 0 <= resume_local < len(rank_files):
+                # Distribute remaining rank-local files from resume_local across workers
+                remaining = rank_files[resume_local:]
+                rem_per_worker = max(1, len(remaining) // num_workers)
+                rem_start = worker_id * rem_per_worker
+                rem_end = rem_start + rem_per_worker if worker_id < num_workers - 1 else len(remaining)
+                worker_files = remaining[rem_start:rem_end]
+                worker_start_idx = resume_local + rem_start
+                # Set position for the first file we'll iterate
+                self.current_file_idx = global_index(resume_local)
+                self.current_position = resume_local_pos
             self._resume_consumed = True
             # Clear consumed resume position so subsequent epochs start fresh
             self._resume_start_file = 0
