@@ -96,7 +96,7 @@ class CheckpointManager:
         """Save complete training checkpoint atomically."""
         with self._lock:
             step = int(getattr(training_state, 'step', 0))
-            timestamp = datetime.utcnow().isoformat() + 'Z'
+            timestamp = datetime.now(datetime.UTC).isoformat() + 'Z'
 
             # Prepare state dict
             state = {
