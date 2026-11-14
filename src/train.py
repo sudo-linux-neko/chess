@@ -41,7 +41,6 @@ from src.data import create_dataloader
 
 
 @dataclass
-@dataclass
 class TrainingState:
     """Complete training state for exact resume."""
     step: int = 0
