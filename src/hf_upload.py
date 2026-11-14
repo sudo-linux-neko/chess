@@ -71,6 +71,17 @@ class HFUploader:
         self.repo_id = hf_cfg.get("repo_id", "")
         self.repo_name = hf_cfg.get("repo_name", "chess-nnue")
         self.token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
+        # Auto-generate repo_id from HF username if not provided and token is available
+        if not self.repo_id and self.token and self._hf_available:
+            try:
+                api = self.HfApi(token=self.token)
+                user_info = api.whoami(token=self.token)
+                username = user_info.get("name") or user_info.get("user", {}).get("name")
+                if username:
+                    self.repo_id = f"{username}/{self.repo_name}"
+                    logger.info(f"Auto-generated repo_id: {self.repo_id}")
+            except Exception as e:
+                logger.debug(f"Could not auto-generate repo_id: {e}")
         self.upload_every_n = hf_cfg.get("upload_every_n", 3)
         self.max_retries = hf_cfg.get("max_retries", 5)
         self.backoff_base = hf_cfg.get("backoff_base", 30)
@@ -226,11 +237,8 @@ class HFUploader:
     def _worker(self):
         """Background worker thread."""
         api = None
-        repo_ready = False
         if self._hf_available and self.token:
             api = self.HfApi(token=self.token)
-            # Ensure repo exists before processing uploads
-            repo_ready = self._ensure_repo_exists(api)
 
         while not self._shutdown.is_set():
             # Check pause
@@ -243,6 +251,12 @@ class HFUploader:
                 _, _, task = self._queue.get(timeout=1.0)
             except queue.Empty:
                 continue
+
+            # Ensure repo exists (re-checked per-task so transient startup
+            # failures don't permanently block all uploads)
+            repo_ready = False
+            if api and self.repo_id:
+                repo_ready = self._ensure_repo_exists(api)
 
             if not self._hf_available or not api or not repo_ready:
                 # Re-queue task for later retry instead of losing it permanently
