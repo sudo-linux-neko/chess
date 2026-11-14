@@ -800,11 +800,13 @@ class NNUELightningModule(pl.LightningModule):
         use_fused = torch.cuda.is_available() and grad_clip == 0.0
 
         # Get model parameters excluding EMA submodule (same filtering as update_ema)
+        # Handle both compiled (_orig_mod.ema_model.xxx) and uncompiled (ema_model.xxx) names
         def _get_trainable_params():
             params = []
             for name, param in self.model.named_parameters(recurse=True):
-                if not name.startswith('ema_model.'):
-                    params.append(param)
+                if name.startswith('ema_model.') or name.startswith('_orig_mod.ema_model.'):
+                    continue
+                params.append(param)
             return params
 
         if use_fused:
@@ -913,17 +915,11 @@ class NNUELightningModule(pl.LightningModule):
             # Restore data resume position
             # current_file_idx is a GLOBAL index (includes rank offset from
             # _update_data_position: base_file + rank + files_completed * world_size).
-            # Convert to rank-local so _update_data_position() can add rank back
-            # without double-counting on resume.
+            # Store it as-is so _update_data_position() can add rank back correctly
+            # for DDP sharding (rank 0 gets even files, rank 1 gets odd files).
             self.training_state.current_file_idx = ts.get("current_file_idx", 0)
             self.training_state.current_position = ts.get("current_position", 0)
-            rank = int(os.environ.get("RANK", "0"))
-            world_size = int(os.environ.get("WORLD_SIZE", "1"))
-            current_file_idx = ts.get("current_file_idx", 0)
-            if world_size > 1:
-                self._resume_start_file = max(0, current_file_idx - rank)
-            else:
-                self._resume_start_file = current_file_idx
+            self._resume_start_file = ts.get("current_file_idx", 0)
             self._resume_start_position = ts.get("current_position", 0)
             # Track previously elapsed time so time budget is correct across resumes
             self._resume_time_offset = ts.get("time_elapsed", 0.0)

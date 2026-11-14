@@ -298,8 +298,9 @@ class NNUEExporter:
         # Filter out ema_model submodule parameters to avoid double-counting
         # (ema_model is a submodule of NNUEModel, so model.parameters()
         # would include EMA params too, corrupting the hash)
+        # Handle both compiled (_orig_mod.ema_model.xxx) and uncompiled (ema_model.xxx) names
         for name, param in model.named_parameters():
-            if name.startswith("ema_model."):
+            if name.startswith("ema_model.") or name.startswith("_orig_mod.ema_model."):
                 continue
             hasher.update(param.data.cpu().numpy().tobytes())
         # Include architecture config for uniqueness
