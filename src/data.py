@@ -1610,5 +1610,5 @@ def create_dataloader(
             np.random.seed(torch.initial_seed() % 2**32),
             random.seed(torch.initial_seed() % 2**32),
         ),
-        multiprocessing_context=mp.get_context('spawn') if hasattr(mp, 'get_context') else None,
+        multiprocessing_context=mp.get_context('spawn') if hw_cfg.get("num_workers", 16) > 0 else None,
     )

@@ -1339,10 +1339,12 @@ def create_trainer(config: Dict[str, Any], checkpoint_manager: CheckpointManager
     precision = "16-mixed" if hw_cfg.get("fp16", True) else "32-true"
     
     # Validation interval: val_check_interval can be int (epochs) or float (fraction of epoch)
+    # IterableDataset requires limit_val_batches to be int or 1.0 (no float fractions).
     val_check_interval = adv_cfg.get("validation", {}).get("val_check_interval", 0.05)
     if isinstance(val_check_interval, float):
         check_val_every_n_epoch = 1
-        limit_val_batches = val_check_interval
+        # Convert float fraction to int batch count for IterableDataset compatibility
+        limit_val_batches = max(1, int(val_check_interval * 100))
     else:
         check_val_every_n_epoch = val_check_interval
         limit_val_batches = 1.0
