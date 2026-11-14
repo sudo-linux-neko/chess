@@ -16,6 +16,7 @@ Based on official Stockfish nettest recipes:
 """
 
 import math
+import os
 import time
 import sys
 from dataclasses import dataclass
@@ -593,12 +594,19 @@ class NNUELightningModule(pl.LightningModule):
         if ppf <= 0:
             return
         
+        # Convert per-rank samples_seen to global samples consumed across all ranks.
+        # samples_seen is incremented per-rank (micro_batch_size * accum_steps per
+        # optimizer step on each rank). Under DDP, each rank processes a disjoint
+        # shard (files[rank::world_size]), so global samples = per-rank * world_size.
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        
         num_files = len(dataset.files)
-        total_samples = self.training_state.samples_seen
+        total_samples = self.training_state.samples_seen * world_size
         
         # Estimate position relative to resume start to avoid counting
-        # pre-resume samples toward post-resume position
-        samples_since_resume = total_samples - self._samples_seen_at_resume
+        # pre-resume samples toward post-resume position. Both are per-rank,
+        # convert to global by multiplying by world_size.
+        samples_since_resume = (total_samples - self._samples_seen_at_resume * world_size)
         if samples_since_resume < 0:
             samples_since_resume = 0
         
