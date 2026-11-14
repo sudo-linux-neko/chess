@@ -111,8 +111,8 @@ checkpoint:
 hf:
   repo_id: "vaibhav/nnue-trainer-checkpoints"
   token_env: "HF_TOKEN"
-  create_repo: true
-  private: false
+  auto_create_repo: true
+  repo_private: false
   upload_workers: 3               # More upload workers
   max_retries: 5
   retry_backoff_base: 1.0

@@ -75,8 +75,8 @@ class HFUploader:
         self.max_retries = hf_cfg.get("max_retries", 5)
         self.backoff_base = hf_cfg.get("backoff_base", 30)
         self.bandwidth_limit_mbps = hf_cfg.get("bandwidth_limit_mbps", 0)  # 0 = unlimited
-        self.auto_create_repo = hf_cfg.get("auto_create_repo", True)
-        self.repo_private = hf_cfg.get("repo_private", False)
+        self.auto_create_repo = hf_cfg.get("auto_create_repo", hf_cfg.get("create_repo", True))
+        self.repo_private = hf_cfg.get("repo_private", hf_cfg.get("private", False))
 
         self._queue: queue.PriorityQueue = queue.PriorityQueue()
         self._worker_thread: Optional[threading.Thread] = None
