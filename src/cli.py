@@ -523,6 +523,21 @@ def run_training(config: dict) -> int:
             training_state=pl_module.training_state,
             ema_model=pl_module.ema_model,
         )
+        # Validate config hash - warn if resuming with a different config than
+        # the one used to save the checkpoint. Silent config mismatch could
+        # corrupt training (different LR schedule, lambda, batch size, etc.).
+        try:
+            import hashlib, yaml
+            saved_config = checkpoint_result.get("config", {})
+            saved_hash = checkpoint_result.get("config_hash") or checkpoint_manager._hash_config(saved_config)
+            current_hash = checkpoint_manager._hash_config(config)
+            if saved_hash != current_hash:
+                print(f"  WARNING: Config hash mismatch on resume!")
+                print(f"    Saved config hash:  {saved_hash}")
+                print(f"    Current config hash: {current_hash}")
+                print(f"    Resuming with current config — hyperparameters may differ from training run.")
+        except Exception:
+            pass  # Don't block resume on hash check failure
         # Store optimizer/scheduler state for restoration in on_train_start()
         # (PL creates its own optimizers during fit(), so we restore state into them there)
         pl_module._optimizer_state = checkpoint_result.get("optimizer_state", {})
