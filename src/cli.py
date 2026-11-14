@@ -548,6 +548,7 @@ def run_training(config: dict) -> int:
                 config=config,
                 ema_model=pl_module.ema_model,
                 is_best=False,  # Interrupted model may not be best
+                data_state={"_lambda_rng": pl_module._lambda_rng.get_state()},  # Preserve lambda jitter across resume
             )
             if ckpt_path and hf_uploader:
                 try:
@@ -592,6 +593,7 @@ def run_training(config: dict) -> int:
                     config=config,
                     ema_model=pl_module.ema_model,
                     is_best=False,
+                    data_state={"_lambda_rng": pl_module._lambda_rng.get_state()},  # Preserve lambda jitter across resume
                 )
                 if ckpt_path:
                     print("  Emergency checkpoint saved.")
@@ -643,6 +645,7 @@ def run_training(config: dict) -> int:
                     config=config,
                     ema_model=pl_module.ema_model,
                     is_best=False,
+                    data_state={"_lambda_rng": pl_module._lambda_rng.get_state()},  # Preserve lambda jitter across resume
                 )
                 if ckpt_path:
                     print("  Emergency checkpoint saved.")
