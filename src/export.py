@@ -212,8 +212,10 @@ class NNUEExporter:
             cal = calibration_data.cpu()
             layer_cpu = layer.cpu()
             
-            # Original output
+            # Original output (model applies ClippedReLU after linear layer)
             orig_out = layer_cpu(cal).numpy()
+            if name in ["feature_transformer", "hidden1", "hidden2"]:
+                orig_out = np.clip(orig_out, 0, 1.0)
             
             # Quantized output (Stockfish-compatible: (dot + bias_q) * scale)
             quant_out = (cal.numpy() @ weight_q.T.astype(np.float32) + bias_q.astype(np.float32)) * scales

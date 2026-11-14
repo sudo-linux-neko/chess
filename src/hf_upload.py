@@ -265,6 +265,9 @@ class HFUploader:
                 # Do NOT count this as an upload retry - _process_task handles
                 # actual upload attempt retries. HF unavailability is not an
                 # upload failure, so we shouldn't consume retry budget for it.
+                # But DO increment retries to prevent infinite re-queue when HF
+                # is persistently unavailable.
+                task.retries += 1
                 if task.retries >= task.max_retries:
                     task.status = UploadStatus.FAILED
                     task.error = "HF unavailable - max retries exceeded"
