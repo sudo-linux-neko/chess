@@ -33,7 +33,6 @@ from collections import deque
 from enum import Enum
 
 import torch
-import torch.multiprocessing as mp
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
 import numpy as np
 
@@ -1624,17 +1623,22 @@ def create_dataloader(
     micro_batch = train_cfg.get("micro_batch_size", 8192)
     batch_size = micro_batch
 
+    # StreamingBinpackDataset is an IterableDataset that handles its own
+    # DDP + worker sharding in __iter__(). Forcing num_workers=0 avoids:
+    #   1. Double-sharding (DataLoader workers + dataset's internal sharding)
+    #   2. Resume duplication: each pickled worker copy starts with
+    #      _resume_consumed=False, so all workers resume from the same position
+    #   3. Unnecessary process overhead for a disk-reading dataset
+    num_workers = 0
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=hw_cfg.get("num_workers", 16),
-        prefetch_factor=hw_cfg.get("prefetch_factor", 8) if hw_cfg.get("num_workers", 16) > 0 else None,
-        persistent_workers=hw_cfg.get("persistent_workers", True) and hw_cfg.get("num_workers", 16) > 0,
+        num_workers=num_workers,
+        prefetch_factor=None,
+        persistent_workers=False,
         pin_memory=hw_cfg.get("pin_memory", True),
         drop_last=is_train and data_cfg.get("drop_last_batch", True),
-        worker_init_fn=lambda wid: (
-            np.random.seed(torch.initial_seed() % 2**32),
-            random.seed(torch.initial_seed() % 2**32),
-        ),
-        multiprocessing_context=mp.get_context('spawn') if hw_cfg.get("num_workers", 16) > 0 else None,
+        worker_init_fn=None,
+        multiprocessing_context=None,
     )
