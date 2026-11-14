@@ -284,10 +284,6 @@ class CheckpointManager:
         config_str = yaml.dump(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]
 
-    def _compute_config_hash(self, config: Dict) -> str:
-        """Alias for _hash_config (backward compatibility)."""
-        return self._hash_config(config)
-
     def _rotate_checkpoints(self, is_best: bool = False):
         """Rotate checkpoints: keep last N + best N."""
         # Get all checkpoint files with robust step parsing

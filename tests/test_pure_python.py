@@ -219,8 +219,8 @@ def test_checkpoint_config_key_aliases():
         print("  PASS: include_* takes precedence over save_*")
 
 
-def test_hash_config_and_alias():
-    """Test _hash_config and _compute_config_hash alias."""
+def test_hash_config():
+    """Test _hash_config produces deterministic, unique hashes."""
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt_dir = Path(tmpdir) / "checkpoints"
         ckpt_dir.mkdir()
@@ -229,17 +229,14 @@ def test_hash_config_and_alias():
 
         test_config = {"model": {"input_dim": 81920}, "training": {"lr": 0.001}}
         h1 = mgr._hash_config(test_config)
-        h2 = mgr._compute_config_hash(test_config)
-
-        assert h1 == h2, f"Alias mismatch: {h1} != {h2}"
         assert len(h1) == 16
-        h3 = mgr._hash_config(test_config)
-        assert h1 == h3, "Hash should be deterministic"
+        h2 = mgr._hash_config(test_config)
+        assert h1 == h2, "Hash should be deterministic"
 
         test_config2 = {"model": {"input_dim": 81920}, "training": {"lr": 0.002}}
-        h4 = mgr._hash_config(test_config2)
-        assert h1 != h4, "Different configs should produce different hashes"
-        print("  PASS: _hash_config and _compute_config_hash work correctly")
+        h3 = mgr._hash_config(test_config2)
+        assert h1 != h3, "Different configs should produce different hashes"
+        print("  PASS: _hash_config works correctly")
 
 
 def test_serialize_training_state_filters_underscore():
@@ -406,7 +403,7 @@ if __name__ == "__main__":
     print("Running pure-Python tests (with mock torch)...")
     print()
     test_checkpoint_config_key_aliases()
-    test_hash_config_and_alias()
+    test_hash_config()
     test_serialize_training_state_filters_underscore()
     test_restore_training_state_only_existing_keys()
     test_training_state_roundtrip_includes_data_position()
