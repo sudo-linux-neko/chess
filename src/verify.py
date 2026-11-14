@@ -106,6 +106,9 @@ class ExportVerifier:
             metrics["verified"] = False
             metrics["failure_reason"] = f"Max error {metrics['max_abs_error_cp']:.6f} > tolerance {self.max_error_cp}"
         
+        if not metrics["verified"]:
+            raise RuntimeError(f"Export verification failed: {metrics}")
+        
         return metrics
 
     def _run_rust_verification(self, nnue_path: Path, test_data: torch.Tensor) -> np.ndarray:

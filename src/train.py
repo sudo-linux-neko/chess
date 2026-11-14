@@ -430,7 +430,7 @@ class NNUELightningModule(pl.LightningModule):
             ema_cfg = self.config.get("advanced", {}).get("ema", {})
             if ema_cfg.get("enabled", True):
                 update_every = ema_cfg.get("update_every", 1)
-                if self.training_state.step % update_every == 0:
+                if update_every > 0 and self.training_state.step % update_every == 0:
                     # Access underlying model (torch.compile wraps it in _orig_mod)
                     model_for_ema = self.model
                     if hasattr(model_for_ema, '_orig_mod'):
@@ -456,7 +456,10 @@ class NNUELightningModule(pl.LightningModule):
         self._maybe_checkpoint()
         
         # Max positions check - stop training when enough positions processed
-        if self.max_positions and self.training_state.samples_seen >= self.max_positions:
+        # samples_seen is per-rank; multiply by world_size for global budget
+        world_size = getattr(self.trainer, 'world_size', 1) or 1
+        global_samples = self.training_state.samples_seen * world_size
+        if self.max_positions and global_samples >= self.max_positions:
             print(f"\n  Max positions ({self.max_positions:,}) reached at step {self.training_state.step}, stopping training")
             self.trainer.should_stop = True
         
@@ -753,7 +756,9 @@ class NNUELightningModule(pl.LightningModule):
     def val_dataloader(self):
         """Return validation dataloader (uses a small subset for fast validation)."""
         # Create a separate validation dataloader with fewer files for speed
-        val_config = dict(self.config)
+        # Use deepcopy to avoid mutating self.config["data"] via shallow-copy aliasing
+        import copy
+        val_config = copy.deepcopy(self.config)
         val_cfg = val_config.get("data", {})
         val_cfg["num_files_simultaneous"] = min(val_cfg.get("num_files_simultaneous", 6), 2)
         return create_dataloader(
@@ -897,7 +902,7 @@ class NNUELightningModule(pl.LightningModule):
             for k, v in ema_state.items():
                 clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
                 clean_ema_state[clean_key] = v
-            checkpoint["ema_state_dict"] = clean_ema_state
+            checkpoint["ema_model"] = clean_ema_state
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         """Load custom state."""

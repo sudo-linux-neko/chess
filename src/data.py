@@ -138,6 +138,9 @@ class StreamingBinpackDataset(IterableDataset):
             source_files = source_files[:source.max_files]
             all_files.extend(source_files)
         if not all_files:
+            # Fall back to globbing all .binpack files if no sources matched
+            all_files = sorted(self.data_dir.glob("*.binpack"))
+        if not all_files:
             raise FileNotFoundError(f"No .binpack files found in {self.data_dir}")
         return all_files
 

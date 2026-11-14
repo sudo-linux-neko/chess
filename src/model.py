@@ -226,11 +226,18 @@ class NNUEModel(nn.Module):
     def create_ema(self) -> "NNUEModel":
         """Create EMA copy of the model."""
         ema_model = NNUEModel(self.config)
-        # Strip _orig_mod. prefix if self is a compiled model
+        # Strip _orig_mod. prefix if self is a compiled model.
+        # Also strip ema_model.* prefix: state_dict() includes EMA submodule
+        # params if create_ema() was already called, and a fresh EMA model
+        # has no ema_model submodule, so those keys would mismatch.
         state = self.state_dict()
         clean_state = {}
         for k, v in state.items():
-            clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+            clean_key = k
+            if k.startswith('_orig_mod.'):
+                clean_key = k.replace('_orig_mod.', '', 1)
+            if clean_key.startswith('ema_model.'):
+                clean_key = clean_key.replace('ema_model.', '', 1)
             clean_state[clean_key] = v
         ema_model.load_state_dict(clean_state)
         ema_model.eval()
