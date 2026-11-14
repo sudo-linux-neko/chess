@@ -620,6 +620,7 @@ def run_full_training(config, is_kaggle):
             config=config,
             ema_model=pl_module.ema_model,
             is_best=False,  # Final model may not be the best; don't overwrite best.pt
+            data_state={"_lambda_rng": pl_module._lambda_rng.get_state()},  # Preserve lambda jitter across resume
         )
         if ckpt_path and hf_uploader and hf_token:
             try:
