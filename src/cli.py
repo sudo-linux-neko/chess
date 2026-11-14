@@ -740,7 +740,7 @@ def run_training(config: dict) -> int:
     test_data = None
     try:
         test_loader = create_dataloader(config, is_train=False, streaming_manager=streaming_manager)
-        test_batch = next(iter(test_loader))
+        test_batch = next(iter(test_loader), None)
         test_data = test_batch["features"][:100]
     except Exception as e:
         print(f"  Warning: Could not get test data for export: {e}")
@@ -877,7 +877,7 @@ def run_verify_export(config: dict) -> int:
     test_data = None
     try:
         test_loader = create_dataloader(config, is_train=False)
-        test_batch = next(iter(test_loader))
+        test_batch = next(iter(test_loader), None)
         test_data = test_batch["features"][:config.get("export", {}).get("verify_samples", 20000)]
     except Exception as e:
         print(f"  Warning: Could not get test data: {e}")

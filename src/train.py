@@ -199,6 +199,8 @@ class NNUELightningModule(pl.LightningModule):
         self.lambda_total_steps = int(self.lambda_cfg.get("total_steps", 5052000))
         self.lambda_warmup_pct = float(self.lambda_cfg.get("warmup_pct", 0.25))
         self.lambda_jitter = self.lambda_cfg.get("jitter", {})
+        if self.lambda_jitter is None:
+            self.lambda_jitter = {}
         
         # Curriculum learning
         self.curriculum_cfg = train_cfg.get("curriculum", {})
