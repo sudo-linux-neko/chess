@@ -250,14 +250,20 @@ class NNUEModel(nn.Module):
             # if parameter registration order ever differs between model and EMA copy.
             ema_params = dict(self.ema_model.named_parameters())
             params = dict(self.named_parameters(recurse=True))
+            # Strip _orig_mod. prefix from compiled model params so they match
+            # EMA param names (ema_model is never compiled)
+            clean_params = {}
+            for k, v in params.items():
+                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
+                clean_params[clean_key] = v
             # Exclude ema_model submodule params from main model (avoid double-counting)
-            params = {k: v for k, v in params.items() if not k.startswith('ema_model.')}
-            common_keys = set(ema_params.keys()) & set(params.keys())
-            if len(common_keys) != len(ema_params) or len(common_keys) != len(params):
+            clean_params = {k: v for k, v in clean_params.items() if not k.startswith('ema_model.')}
+            common_keys = set(ema_params.keys()) & set(clean_params.keys())
+            if len(common_keys) != len(ema_params) or len(common_keys) != len(clean_params):
                 print(f"  Warning: EMA/model parameter key mismatch: "
-                      f"ema={len(ema_params)}, model={len(params)}, common={len(common_keys)}")
+                      f"ema={len(ema_params)}, model={len(clean_params)}, common={len(common_keys)}")
             for name in common_keys:
-                ema_params[name].mul_(decay).add_(params[name], alpha=1.0 - decay)
+                ema_params[name].mul_(decay).add_(clean_params[name], alpha=1.0 - decay)
 
     def forward_ema(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using EMA model."""
