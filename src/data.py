@@ -114,6 +114,17 @@ class StreamingBinpackDataset(IterableDataset):
         # from incorrectly using end-of-epoch-1 position as start position)
         self._resume_consumed = False
 
+    def __getstate__(self):
+        """Exclude non-picklable threading lock from serialization."""
+        state = self.__dict__.copy()
+        state.pop('_position_lock', None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore non-picklable threading lock after deserialization."""
+        self.__dict__.update(state)
+        self._position_lock = threading.Lock()
+
     def _discover_files(self) -> List[Path]:
         """Find all .binpack files in data_dir, sorted by priority source."""
         all_files = []
@@ -630,7 +641,22 @@ class StreamingDataManager:
         # Start background downloader
         if self.stream_cfg.auto_cleanup:
             self._start_background_downloader()
-    
+
+    def __getstate__(self):
+        """Exclude non-picklable threading objects from serialization."""
+        state = self.__dict__.copy()
+        state.pop('_lock', None)
+        state.pop('_stop_download', None)
+        state.pop('_download_thread', None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore non-picklable threading objects after deserialization."""
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
+        self._stop_download = threading.Event()
+        self._download_thread = None
+
     def _discover_all_files(self):
         """List all available files from HF sources without downloading."""
         print("Discovering available training files...")

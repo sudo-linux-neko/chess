@@ -339,6 +339,8 @@ def run_smoke_test(config: dict) -> int:
         scaler=None,
         training_state=pl_module.training_state,
         config=config,
+        ema_model=pl_module.ema_model,
+        data_state={"_lambda_rng": pl_module._lambda_rng.get_state()},
     )
     if ckpt_path:
         print(f"Checkpoint saved: {ckpt_path}")

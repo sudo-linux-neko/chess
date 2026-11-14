@@ -118,13 +118,25 @@ class CheckpointManager:
 
             # Optional components
             if self.save_optimizer and optimizer is not None:
-                state["optimizer"] = optimizer.state_dict()
+                try:
+                    state["optimizer"] = optimizer.state_dict()
+                except Exception as e:
+                    print(f"  Warning: Could not save optimizer state: {e}")
             if self.save_scheduler and scheduler is not None:
-                state["scheduler"] = scheduler.state_dict()
+                try:
+                    state["scheduler"] = scheduler.state_dict()
+                except Exception as e:
+                    print(f"  Warning: Could not save scheduler state: {e}")
             if self.save_scaler and scaler is not None:
-                state["scaler"] = scaler.state_dict()
+                try:
+                    state["scaler"] = scaler.state_dict()
+                except Exception as e:
+                    print(f"  Warning: Could not save scaler state: {e}")
             if self.save_rng:
-                state["rng"] = self._get_rng_state()
+                try:
+                    state["rng"] = self._get_rng_state()
+                except Exception as e:
+                    print(f"  Warning: Could not save RNG state: {e}")
             if self.save_data_state and data_state is not None:
                 state["data_state"] = data_state
             if ema_model is not None:
@@ -355,19 +367,31 @@ class CheckpointManager:
 
         # Load optimizer
         if optimizer is not None and "optimizer" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer"])
+            try:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            except Exception as e:
+                print(f"  Warning: Could not restore optimizer state: {e}")
 
         # Load scheduler
         if scheduler is not None and "scheduler" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler"])
+            try:
+                scheduler.load_state_dict(checkpoint["scheduler"])
+            except Exception as e:
+                print(f"  Warning: Could not restore scheduler state: {e}")
 
         # Load scaler
         if scaler is not None and "scaler" in checkpoint:
-            scaler.load_state_dict(checkpoint["scaler"])
+            try:
+                scaler.load_state_dict(checkpoint["scaler"])
+            except Exception as e:
+                print(f"  Warning: Could not restore scaler state: {e}")
 
         # Load RNG
         if "rng" in checkpoint:
-            self._set_rng_state(checkpoint["rng"])
+            try:
+                self._set_rng_state(checkpoint["rng"])
+            except Exception as e:
+                print(f"  Warning: Could not restore RNG state: {e}")
 
         # Load EMA
         if ema_model is not None and "ema_model" in checkpoint:

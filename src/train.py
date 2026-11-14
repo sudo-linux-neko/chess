@@ -818,7 +818,10 @@ class NNUELightningModule(pl.LightningModule):
         hurt gradient flow and slow convergence.
         """
         # Log current LR for progress bar (every optimizer step)
-        lr = optimizer.param_groups[0]['lr']
+        try:
+            lr = optimizer.param_groups[0]['lr']
+        except (IndexError, KeyError, AttributeError):
+            lr = 0.0
         self.log("lr", lr, prog_bar=True, sync_dist=True)
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
