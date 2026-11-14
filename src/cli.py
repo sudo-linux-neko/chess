@@ -594,6 +594,8 @@ def run_training(config: dict) -> int:
                 sched = scheds[0] if scheds else None
             except Exception:
                 sched = None
+            # Update time_elapsed before saving so resume time budget is accurate
+            pl_module.training_state.time_elapsed = time.time() - pl_module._global_start_time + pl_module._resume_time_offset
             ckpt_path = checkpoint_manager.save_checkpoint(
                 model=pl_module.model,
                 optimizer=opt,
@@ -639,6 +641,8 @@ def run_training(config: dict) -> int:
                     sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
+                # Update time_elapsed before saving so resume time budget is accurate
+                pl_module.training_state.time_elapsed = time.time() - pl_module._global_start_time + pl_module._resume_time_offset
                 ckpt_path = checkpoint_manager.save_checkpoint(
                     model=pl_module.model,
                     optimizer=opt,
@@ -691,6 +695,8 @@ def run_training(config: dict) -> int:
                     sched = scheds[0] if scheds else None
                 except Exception:
                     sched = None
+                # Update time_elapsed before saving so resume time budget is accurate
+                pl_module.training_state.time_elapsed = time.time() - pl_module._global_start_time + pl_module._resume_time_offset
                 ckpt_path = checkpoint_manager.save_checkpoint(
                     model=pl_module.model,
                     optimizer=opt,
@@ -743,6 +749,8 @@ def run_training(config: dict) -> int:
         sched = scheds[0] if scheds else None
     except Exception:
         sched = None
+    # Update time_elapsed before saving final checkpoint
+    pl_module.training_state.time_elapsed = time.time() - pl_module._global_start_time + pl_module._resume_time_offset
     ckpt_path = checkpoint_manager.save_checkpoint(
         model=pl_module.model,
         optimizer=opt,
