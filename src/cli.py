@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,9 @@ def _maybe_spawn_kaggle(args: argparse.Namespace) -> bool:
     n = torch.cuda.device_count()
     if n <= 1:
         return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
     cmd = [
         sys.executable,
         "-m",
@@ -36,7 +40,7 @@ def _maybe_spawn_kaggle(args: argparse.Namespace) -> bool:
         "--nproc_per_node",
         str(n),
         "--master_port",
-        "29511",
+        str(port),
         str(ROOT / "run.py"),
         "train",
         "--config",
