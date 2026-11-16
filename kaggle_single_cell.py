@@ -1,12 +1,15 @@
 # Copyright (C) 2026 Vaibhav
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Paste into a Kaggle notebook cell (GPU T4 x2, internet on).
+"""Paste into one Kaggle notebook cell (GPU T4 x2, Internet on).
 
-It clones this repository if needed, installs the Rust extension, and starts a
-2-GPU distributed run with the 9 hour budget from configs/train.yaml.
+Prerequisite: Kaggle Add-ons -> Secrets -> add `HF_TOKEN` with a write token.
+This clones/updates the repo, installs Rust if missing, builds the extension,
+logs in to Hugging Face, trains for the 9h budget on both T4s, uploads
+checkpoints, and prints the final net info.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,33 +17,44 @@ from pathlib import Path
 REPO = "https://github.com/thisisforlearn/chess-works.git"
 ROOT = Path("/kaggle/working/chess-works")
 
-if not (ROOT / "run.py").exists():
-    subprocess.run(["git", "clone", REPO, str(ROOT)], check=True)
 
+def run(cmd, **kwargs):
+    print("+", cmd if isinstance(cmd, str) else " ".join(map(str, cmd)), flush=True)
+    subprocess.run(cmd, check=True, **kwargs)
+
+
+if shutil.which("cargo") is None:
+    run(
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+        shell=True,
+    )
+os.environ["PATH"] = f"{Path.home() / '.cargo' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+
+if (ROOT / ".git").exists():
+    run(["git", "-C", str(ROOT), "fetch", "origin"])
+    run(["git", "-C", str(ROOT), "reset", "--hard", "origin/master"])
+else:
+    run(["git", "clone", REPO, str(ROOT)])
 os.chdir(ROOT)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "maturin", "huggingface_hub"], check=True)
-subprocess.run(
-    [sys.executable, "-m", "maturin", "develop", "--release", "-m", "crates/nnue_core/Cargo.toml"],
-    check=True,
-)
 
-env = dict(os.environ)
-token = env.get("HF_TOKEN")
-if not token:
-    try:
-        from kaggle_secrets import UserSecretsClient
+run([sys.executable, "-m", "pip", "install", "-q", "maturin>=1.7", "huggingface_hub>=0.23", "pyyaml>=6"])
+run([sys.executable, "-m", "maturin", "build", "--release", "-m", "crates/nnue_core/Cargo.toml"])
+wheel = sorted((ROOT / "crates/nnue_core/target/wheels").glob("nnue_core-*.whl"))[-1]
+run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "--no-deps", str(wheel)])
 
-        token = UserSecretsClient().get_secret("HF_TOKEN")
-    except Exception:
-        pass
-if token:
-    from huggingface_hub import login, whoami
+from kaggle_secrets import UserSecretsClient
+from huggingface_hub import login, whoami
 
-    login(token=token, add_to_git_credential=False)
-    print("HF account:", whoami()["name"])
+try:
+    token = UserSecretsClient().get_secret("HF_TOKEN")
+except Exception as exc:
+    raise SystemExit("Add a Kaggle secret named HF_TOKEN (write token), then rerun.") from exc
+os.environ["HF_TOKEN"] = token
+login(token=token, add_to_git_credential=False)
+print("HF account:", whoami()["name"], flush=True)
 
-subprocess.run(
+run(
     [sys.executable, "run.py", "train", "--config", "configs/train.yaml", "--kaggle"],
-    check=True,
-    env=env,
+    env=os.environ.copy(),
 )
+run([sys.executable, "run.py", "info", "--nnue", "checkpoints/final.nnue"])
