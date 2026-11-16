@@ -26,10 +26,18 @@ subprocess.run(
 
 env = dict(os.environ)
 token = env.get("HF_TOKEN")
-if token:
-    from huggingface_hub import login
+if not token:
+    try:
+        from kaggle_secrets import UserSecretsClient
 
-    login(token=token)
+        token = UserSecretsClient().get_secret("HF_TOKEN")
+    except Exception:
+        pass
+if token:
+    from huggingface_hub import login, whoami
+
+    login(token=token, add_to_git_credential=False)
+    print("HF account:", whoami()["name"])
 
 subprocess.run(
     [sys.executable, "run.py", "train", "--config", "configs/train.yaml", "--kaggle"],

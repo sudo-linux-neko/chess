@@ -22,9 +22,14 @@ import yaml
 
 from .checkpoint import (
     HFUploader,
+    alias_latest,
+    checkpoint_name,
+    format_duration,
     load_checkpoint,
+    prepare_hf,
     save_checkpoint,
     try_download_checkpoint,
+    write_json,
 )
 from .data import BinpackStream, DataConfig, StreamState, ensure_files, move_batch_to
 from .export import DEFAULT_DESCRIPTION, export_net
@@ -57,9 +62,9 @@ class TrainCfg:
 @dataclass
 class CheckpointCfg:
     dir: str = "./checkpoints"
-    hf_repo: str = ""
+    hf_repo: str = "neko-i-am-a-cat/chess-nnue"
     repo_type: str = "model"
-    upload: bool = False
+    upload: bool = True
     resume: bool = True
     latest_name: str = "latest.pt"
 
@@ -153,6 +158,23 @@ def run(config: Config, config_path: str | None = None) -> None:
     torch.manual_seed(config.train.seed + rank)
     t0 = time.monotonic()
 
+    # --- Hugging Face auth/repo (default on; account name is never hardcoded) ---
+    hf_token: str | None = None
+    hf_account: str | None = None
+    do_upload = bool(config.checkpoint.upload and config.checkpoint.hf_repo)
+    if config.checkpoint.upload and not config.checkpoint.hf_repo:
+        if main:
+            print("[hf] upload requested but checkpoint.hf_repo is empty; disabling upload")
+    if do_upload and main:
+        _, hf_token, hf_account = prepare_hf(
+            config.checkpoint.hf_repo, config.checkpoint.repo_type
+        )
+        print(f"[hf] uploading as account '{hf_account}' to {config.checkpoint.hf_repo}")
+    if world > 1 and do_upload:
+        box = [hf_account]
+        dist.broadcast_object_list(box, src=0)
+        hf_account = box[0]
+
     # --- data (rank 0 downloads, everyone uses the same paths) ---
     if main:
         print(f"[init] world={world} device={device} torch={torch.__version__}")
@@ -219,7 +241,11 @@ def run(config: Config, config_path: str | None = None) -> None:
         paths, world_size=world, rank=rank, state=local_state, cycle=config.data.cycle
     )
 
-    uploader = HFUploader() if (config.checkpoint.upload and config.checkpoint.hf_repo and main) else None
+    uploader = HFUploader(token=hf_token) if (do_upload and main) else None
+    state_path = Path(config.checkpoint.dir) / "training_state.json"
+    loss_hist: deque[float] = deque(maxlen=config.train.loss_window)
+    best_loss = float(state["best_loss"]) if state else float("inf")
+    upload_index = int(state.get("upload_index", 0)) if state else 0
     stop = {"flag": False}
 
     def _handle_signal(signum, _frame):
@@ -228,11 +254,27 @@ def run(config: Config, config_path: str | None = None) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    def do_checkpoint(step: int, best: float, label: str | None = None) -> None:
+    def do_checkpoint(
+        step: int,
+        best: float,
+        label: str | None = None,
+        reason: str = "periodic",
+        do_upload: bool = True,
+    ) -> None:
+        nonlocal upload_index
         states = _gather_states(stream.state_dict(), world, rank)
         if not main:
             return
-        path = ckpt_path if label is None else Path(config.checkpoint.dir) / label
+        now = time.monotonic()
+        elapsed = now - t0
+        remaining = max(0.0, config.train.time_budget_hours * 3600.0 - elapsed)
+        cur_loss = sum(loss_hist) / len(loss_hist) if loss_hist else 0.0
+        next_index = upload_index + 1 if (uploader and do_upload) else upload_index
+        if label is None:
+            name = checkpoint_name(step, elapsed, remaining, cur_loss, next_index, reason)
+        else:
+            name = label
+        path = Path(config.checkpoint.dir) / name
         save_checkpoint(
             path,
             model,
@@ -242,15 +284,50 @@ def run(config: Config, config_path: str | None = None) -> None:
             states,
             asdict(config),
             best_loss=best,
-            extra={"config_path": config_path, "global_batch": global_batch},
+            extra={
+                "config_path": config_path,
+                "global_batch": global_batch,
+                "upload_index": next_index,
+                "elapsed_s": elapsed,
+                "remaining_s": remaining,
+                "loss": cur_loss,
+                "reason": reason,
+                "hf_account": hf_account,
+                "hf_repo": config.checkpoint.hf_repo,
+            },
         )
-        print(f"[ckpt] saved {path} at step {step}")
-        if uploader and label is None:
-            uploader.submit(str(path), config.checkpoint.hf_repo, config.checkpoint.latest_name,
+        alias_latest(path, ckpt_path)
+        if uploader and do_upload:
+            upload_index = next_index
+            remote = f"checkpoints/{name}" if label is None else name
+            uploader.submit(str(path), config.checkpoint.hf_repo, remote,
                             config.checkpoint.repo_type)
-
-    loss_hist: deque[float] = deque(maxlen=config.train.loss_window)
-    best_loss = float(state["best_loss"]) if state else float("inf")
+            uploader.submit(str(ckpt_path), config.checkpoint.hf_repo,
+                            config.checkpoint.latest_name, config.checkpoint.repo_type)
+            write_json(
+                state_path,
+                {
+                    "account": hf_account,
+                    "repo": config.checkpoint.hf_repo,
+                    "repo_url": f"https://huggingface.co/{config.checkpoint.hf_repo}",
+                    "name": name,
+                    "step": step,
+                    "total_steps": total_steps,
+                    "loss": cur_loss,
+                    "elapsed_s": elapsed,
+                    "remaining_s": remaining,
+                    "upload_index": upload_index,
+                    "reason": reason,
+                    "updated": int(time.time()),
+                },
+            )
+            uploader.submit(str(state_path), config.checkpoint.hf_repo,
+                            "training_state.json", config.checkpoint.repo_type)
+        print(
+            f"[ckpt] {name} step={step} loss={cur_loss:.5f} "
+            f"elapsed={format_duration(elapsed)} left={format_duration(remaining)} "
+            f"upload #{upload_index}"
+        )
     last_log = time.monotonic()
     last_ckpt = time.monotonic()
     measure_done = total_steps > 0
@@ -275,7 +352,7 @@ def run(config: Config, config_path: str | None = None) -> None:
         if stop["flag"]:
             if main:
                 print("[train] signal received, checkpointing")
-            do_checkpoint(step, best_loss)
+            do_checkpoint(step, best_loss, reason="interrupted")
             break
 
         accum_loss = 0.0
@@ -344,7 +421,7 @@ def run(config: Config, config_path: str | None = None) -> None:
     if total_steps and step >= total_steps:
         if main:
             print(f"[train] finished {step} steps")
-        do_checkpoint(step, best_loss, label="final.pt")
+        do_checkpoint(step, best_loss, label="final.pt", reason="final")
 
     # --- export + verify ---
     if config.export.enabled and main:

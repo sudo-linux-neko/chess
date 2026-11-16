@@ -21,28 +21,45 @@ Free GPU quota is about 30 h/week; one full run is 9 h.
 Kaggle already ships CUDA PyTorch and numpy. `maturin develop` builds the Rust
 extension (`nnue_core`) against the active Python and can take a few minutes.
 
-## 3. Optional: Hugging Face upload
+## 3. Hugging Face upload (default on)
 
-Add a Kaggle secret `HF_TOKEN` (Add-ons -> Secrets), then:
+Add a Kaggle secret named `HF_TOKEN` (Add-ons -> Secrets) with a **write** token.
+The trainer reads it automatically, and this cell does the same explicitly:
 
 ```python
-import os
-from huggingface_hub import login
-login(token=os.environ["HF_TOKEN"])
+from kaggle_secrets import UserSecretsClient
+from huggingface_hub import login, whoami
+
+user_secrets = UserSecretsClient()
+login(token=user_secrets.get_secret("HF_TOKEN"), add_to_git_credential=False)
+print("HF account:", whoami()["name"])
 ```
 
-Set in `configs/train.yaml`:
+The account name is read from the token, never hardcoded. The trainer prints
+`[hf] logged in as <account>` and checks that the target repo owner matches
+that account (or one of its orgs).
+
+Defaults in `configs/train.yaml`:
 
 ```yaml
 checkpoint:
-  hf_repo: thisisforlearn/chess-works-nnue
+  hf_repo: neko-i-am-a-cat/chess-nnue
   upload: true
   resume: true
 ```
 
+Uploads (background thread, never block training):
+
+```
+checkpoints/step_0001234_elapsed_02h15m_left_06h45m_loss_0.02413_up_007.pt
+latest.pt
+training_state.json
+final.pt
+final.nnue
+```
+
 With `resume: true`, a missing local checkpoint is downloaded from the repo,
-so a restarted session continues from the last uploaded step. Uploads run in a
-background thread and never block training.
+so a restarted session continues from the last uploaded step.
 
 ## 4. Train
 
@@ -69,9 +86,11 @@ Adjust `train.batch_size` if you hit OOM. 16384 per GPU is conservative for
 At the end of the run:
 
 ```
-checkpoints/latest.pt   resumable state
-checkpoints/final.pt    final checkpoint
-checkpoints/final.nnue  Stockfish 16.1 Small net (~3.1 MB)
+checkpoints/step_*_elapsed_*_left_*_loss_*_up_*.pt   periodic checkpoints
+checkpoints/latest.pt                              resumable alias
+checkpoints/final.pt                               final checkpoint
+checkpoints/final.nnue                             Stockfish 16.1 Small net
+checkpoints/training_state.json                    account/step/loss/ETA
 ```
 
 Copy `final.nnue` to `/kaggle/working/` (or let the HF uploader handle it) and

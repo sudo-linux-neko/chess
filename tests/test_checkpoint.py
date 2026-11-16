@@ -27,3 +27,21 @@ def test_atomic_save(tmp_path):
     atomic_save({"ok": True}, p)
     assert p.exists() and not (tmp_path / "a.bin.tmp").exists()
     assert torch.load(p, weights_only=False)["ok"] is True
+
+
+def test_checkpoint_name_contains_run_stats():
+    from src.checkpoint import checkpoint_name, format_duration
+
+    assert format_duration(0) == "00h00m"
+    assert format_duration(3661) == "01h01m"
+    name = checkpoint_name(1234, 2 * 3600 + 15 * 60, 6 * 3600 + 45 * 60, 0.02413, 7)
+    assert name == "step_0001234_elapsed_02h15m_left_06h45m_loss_0.02413_up_007.pt"
+    assert checkpoint_name(5, 0, 0, 1.0, 1, "interrupted").endswith("_up_001_interrupted.pt")
+
+
+def test_train_config_uploads_by_default():
+    from src.train import load_config
+
+    cfg = load_config("configs/train.yaml")
+    assert cfg.checkpoint.hf_repo == "neko-i-am-a-cat/chess-nnue"
+    assert cfg.checkpoint.upload is True

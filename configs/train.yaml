@@ -33,9 +33,9 @@ train:
 
 checkpoint:
   dir: ./checkpoints
-  hf_repo: ""            # e.g. thisisforlearn/chess-works-nnue
+  hf_repo: neko-i-am-a-cat/chess-nnue
   repo_type: model
-  upload: false
+  upload: true           # uploads every named checkpoint + latest.pt + final.nnue
   resume: true
   latest_name: latest.pt
 

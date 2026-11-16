@@ -83,11 +83,26 @@ The run is **time-budgeted**. It measures throughput for the first
 `train.time_budget_hours`, leaving time for export/upload. Set
 `train.max_steps` to override.
 
-Checkpoints (`checkpoints/latest.pt`) are atomic and store model, optimizer,
-step, LR schedule, RNG and each rank's exact binpack cursor
-`(file, byte, skip_entries)`. Resume is bit-exact. Set
-`checkpoint.hf_repo` + `checkpoint.upload: true` to push checkpoints and the
-final net to the Hugging Face Hub from a background thread.
+Checkpoints are atomic and store model, optimizer, step, LR schedule, RNG and
+each rank's exact binpack cursor `(file, byte, skip_entries)`. Resume is
+bit-exact. Every periodic checkpoint is named with its step, elapsed run time,
+budget left, loss and upload number, e.g.
+`step_0001234_elapsed_02h15m_left_06h45m_loss_0.02413_up_007.pt`.
+
+Upload to the Hugging Face Hub is **on by default**:
+
+```yaml
+checkpoint:
+  hf_repo: neko-i-am-a-cat/chess-nnue
+  upload: true
+  resume: true
+```
+
+The token is resolved from `HF_TOKEN`, then the Kaggle secret named `HF_TOKEN`,
+then the local `hf auth login`. The real account name is printed (from
+`whoami()`), and the repo owner is checked against it. Each checkpoint uploads
+the named file, `latest.pt`, and `training_state.json`; the run also uploads
+`final.pt` and `final.nnue`. Uploads run in a background thread.
 
 ## Export and verify
 
