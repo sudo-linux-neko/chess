@@ -204,7 +204,7 @@ def run(config: Config, config_path: str | None = None) -> None:
 
     if world > 1:
         model = nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank] if device.type == "cuda" else None,
+            model, device_ids=[local_rank] if device.type in ("cuda", "xpu") else None,
             broadcast_buffers=False,
         )
 
