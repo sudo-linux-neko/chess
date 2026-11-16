@@ -57,4 +57,8 @@ run(
     [sys.executable, "run.py", "train", "--config", "configs/train.yaml", "--kaggle"],
     env=os.environ.copy(),
 )
-run([sys.executable, "run.py", "info", "--nnue", "checkpoints/final.nnue"])
+net = ROOT / "checkpoints" / "final.nnue"
+if net.exists():
+    run([sys.executable, "run.py", "info", "--nnue", str(net)])
+else:
+    print("No final.nnue (training did not reach export).", flush=True)
