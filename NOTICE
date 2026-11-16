@@ -1,28 +1,35 @@
-NOTICE
+Copyright (C) 2026 Vaibhav
+SPDX-License-Identifier: GPL-3.0-or-later
 
-This project includes code derived from the following sources:
+This project is a from-scratch trainer for Stockfish 16.1 "Small" networks.
+It contains original Rust and Python code written for this project, plus
+reference/derived behaviour from the following GPL projects:
 
-1. Stockfish NNUE PyTorch Training Code
-   Source: https://github.com/official-stockfish/nnue-pytorch
+1. Stockfish
+   Source:  https://github.com/official-stockfish/Stockfish (tag sf_16.1)
    License: GNU GPL v3.0
    Copyright: The Stockfish developers
-   Modifications: Adapted for Kaggle training, added checkpointing/HF upload,
-                  time-aware scheduling, export verification, and CLI entry points.
+   Use: architecture constants, HalfKAv2_hm feature layout, layer stack and
+        PSQT bucket rules, integer inference/quantization and .nnue file
+        serialization. No Stockfish source is compiled or linked.
 
-2. PyTorch Lightning
-   Source: https://github.com/Lightning-AI/lightning
-   License: Apache-2.0
-   Copyright: The PyTorch Lightning team
+2. nnue-pytorch
+   Source:  https://github.com/official-stockfish/nnue-pytorch
+            (commit 2db3787d2e36f7142ea4d0e307b502dda4095cd9)
+   License: GNU GPL v3.0
+   Copyright: The Stockfish developers
+   Use: float training semantics (pairwise product, PSQT initialisation,
+        win-rate loss, weight clipping) and serialization layout.
 
-3. Hugging Face Hub
-   Source: https://github.com/huggingface/huggingface_hub
-   License: Apache-2.0
-   Copyright: The Hugging Face team
+3. sfbinpack
+   Source:  https://github.com/Disservin/binpack-rust
+   License: GNU GPL v3.0
+   Copyright: Disservin and contributors
+   Use: reading real Stockfish .binpack files and position representation.
 
-4. Ranger Optimizer (RAdam + Lookahead)
-   Source: https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer
-   License: Apache-2.0
-   Copyright: Less Wright
+4. pyo3 / numpy-rs / ndarray / crossbeam-channel / thiserror
+   Licenses: MIT OR Apache-2.0 (see each crate)
+   Use: Rust <-> Python bindings and concurrency.
 
-This software is distributed under the GNU GPL v3.0 license.
-See LICENSE file for full terms.
+The combined work is distributed under the GNU GPL v3.0 or later.
+See LICENSE for the full text.

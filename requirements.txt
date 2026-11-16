@@ -1,33 +1,15 @@
-# Ultra-Optimized NNUE Trainer for Stockfish
-# Requirements for Kaggle 2x T4 (10h budget)
+# Copyright (C) 2026 Vaibhav
+# SPDX-License-Identifier: GPL-3.0-or-later
 
-# Core ML
-torch>=2.3.0
-torchvision>=0.18.0
-pytorch-lightning>=2.2.0
-numpy>=1.26.0
+# Python side: GPU training only. Data decoding, features, quantization and
+# .nnue writing are in the Rust core (crates/nnue_core).
+torch>=2.3
+numpy>=1.26
 pyyaml>=6.0
+huggingface_hub>=0.23
 
-# Data loading
-huggingface_hub>=0.23.0
-tqdm>=4.66.0
+# Build/install the Rust extension (maturin develop --release).
+maturin>=1.7
 
-# C++ loader compilation
-cmake>=3.15.0
-pybind11>=2.11.0
-
-# Rust loader (optional, for SIMD acceleration)
-# maturin>=1.7.0  # Install separately: pip install maturin
-
-# Export & verification
-# Rust quantized inference loaded via PyO3
-
-# Logging
-tensorboard>=2.16.0
-
-# Testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
-
-# Optional: Weights & Biases
-# wandb>=0.17.0
+# Tests
+pytest>=8.0

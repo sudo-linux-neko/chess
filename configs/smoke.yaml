@@ -1,0 +1,43 @@
+# Copyright (C) 2026 Vaibhav
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Tiny CPU smoke test: 80 steps on the 86 MB tb6dtm sample, then export+verify.
+
+data:
+  repo: vondele/rescored
+  repo_type: dataset
+  files:
+    - tb6dtm.binpack
+  cache_dir: ""
+  cycle: true
+
+train:
+  time_budget_hours: 0.5
+  batch_size: 4096
+  grad_accum: 1
+  lr: 0.001
+  lr_min: 0.0001
+  warmup_steps: 10
+  max_steps: 80
+  min_steps: 10
+  measure_steps: 5
+  log_every: 10
+  checkpoint_minutes: 30
+  compile: false
+  seed: 42
+  lambda_start: 1.0
+  lambda_end: 1.0
+  grad_clip: 0.0
+  loss_window: 10
+
+checkpoint:
+  dir: ./checkpoints_smoke
+  hf_repo: ""
+  upload: false
+  resume: false
+  latest_name: latest.pt
+
+export:
+  enabled: true
+  description: "SF16.1 Small smoke test by Vaibhav"
+  verify_samples: 1024

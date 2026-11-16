@@ -50,7 +50,6 @@ Makefile
 
 # Rust
 target/
-Cargo.lock
 
 # IDE
 .vscode/
@@ -66,3 +65,6 @@ Thumbs.db
 # Notebooks
 .ipynb_checkpoints/
 *.ipynbtarget/
+# Local smoke artifacts
+checkpoints_smoke/
+final.nnue

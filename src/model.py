@@ -1,286 +1,222 @@
 # Copyright (C) 2026 Vaibhav
 # SPDX-License-Identifier: GPL-3.0-or-later
+"""Stockfish 16.1 "Small" NNUE, exact architecture.
 
-"""
-Ultra-Optimized NNUE Model Architecture for Maximum Elo.
+    HalfKAv2_hm (22528) -> FT (128 per perspective) -> pairwise product (128)
+      -> 8 layer stacks selected by (piece_count-1)//4
+      -> 16 -> [sqr 15 | clipped 15] -> 32 -> 1
+      -> + skip + psqt[bucket]
 
-Based on official Stockfish nnue-pytorch and nettest best practices:
-- HalfKAv2_hm feature set
-- Kaiming Normal initialization (critical for ClippedReLU)
-- Proper ClippedReLU implementation
-- torch.compile compatibility
-- EMA support for evaluation
+The float forward mirrors Stockfish's integer inference (including the
+127/128 pairwise scaling) so quantization in :mod:`src.export` is faithful.
 """
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any
-import math
+import torch.nn.functional as F
+
+INPUT_DIM = 22528
+PAD_INDEX = INPUT_DIM
+L1 = 128
+L2 = 15
+L3 = 32
+LAYER_STACKS = 8
+PSQT_BUCKETS = 8
+NNUE2SCORE = 600.0
+QUANTIZED_ONE = 127.0
+WEIGHT_SCALE_HIDDEN = 64.0
+WEIGHT_SCALE_OUT = 16.0
+
+# Quantization limits, derived from SF16.1's integer layers.
+MAX_HIDDEN_WEIGHT = QUANTIZED_ONE / WEIGHT_SCALE_HIDDEN  # 127/64
+MAX_OUT_WEIGHT = (QUANTIZED_ONE * QUANTIZED_ONE) / (NNUE2SCORE * WEIGHT_SCALE_OUT)
+
+# Stockfish's initial PSQT material values, in internal units (nnue-pytorch's
+# halfka_psqts()). White pieces are positive, black pieces negative.
+PSQT_PIECE_VALUES = {1: 126, 2: 781, 3: 825, 4: 1276, 5: 2538}
+KING_BUCKETS = [
+    -1, -1, -1, -1, 31, 30, 29, 28,
+    -1, -1, -1, -1, 27, 26, 25, 24,
+    -1, -1, -1, -1, 23, 22, 21, 20,
+    -1, -1, -1, -1, 19, 18, 17, 16,
+    -1, -1, -1, -1, 15, 14, 13, 12,
+    -1, -1, -1, -1, 11, 10, 9, 8,
+    -1, -1, -1, -1, 7, 6, 5, 4,
+    -1, -1, -1, -1, 3, 2, 1, 0,
+]
 
 
-def _get_clipped_relu():
-    """Get optimized ClippedReLU - uses torch.compile compatible implementation."""
-    return torch.clamp
+def _halfka_index(king_sq: int, sq: int, piece_type: int, black: bool) -> int:
+    plane = (piece_type - 1) * 2 + int(black)
+    if plane == 11:
+        plane = 10
+    kfile = king_sq & 7
+    orient_king = (7 if kfile < 4 else 0) ^ king_sq
+    orient_sq = (7 if kfile < 4 else 0) ^ sq
+    return orient_sq + plane * 64 + KING_BUCKETS[orient_king] * 704
 
 
-class ClippedReLU(nn.Module):
-    """ClippedReLU: min(max(x, 0), 1) - Stockfish standard activation."""
-
-    def __init__(self, max_value: float = 1.0):
-        super().__init__()
-        self.max_value = max_value
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.clamp(min=0.0, max=self.max_value)
-
-    def extra_repr(self) -> str:
-        return f"max_value={self.max_value}"
+def initial_psqt() -> torch.Tensor:
+    """[INPUT_DIM, 8] PSQT weights in ``1.0 == 600`` units."""
+    out = torch.zeros(INPUT_DIM, PSQT_BUCKETS, dtype=torch.float32)
+    for king_sq in range(64):
+        for sq in range(64):
+            for pt, val in PSQT_PIECE_VALUES.items():
+                for black in (False, True):
+                    idx = _halfka_index(king_sq, sq, pt, black)
+                    out[idx, :] = (-val if black else val) / NNUE2SCORE
+    return out
 
 
-class FeatureTransformer(nn.Module):
-    """
-    HalfKAv2_hm Feature Transformer with shared weights.
-    
-    64 king buckets × 1280 features → 256 per bucket (shared weights)
-    Accumulator size: 64 × 256 = 16,384
-    """
-
-    def __init__(
-        self,
-        num_buckets: int = 64,
-        features_per_bucket: int = 1280,
-        output_dim: int = 256,
-        init_type: str = "kaiming_normal",
-        init_gain: float = 1.0,
-    ):
-        super().__init__()
-        self.num_buckets = num_buckets
-        self.features_per_bucket = features_per_bucket
-        self.output_dim = output_dim
-        self.input_dim = num_buckets * features_per_bucket
-
-        # Shared linear layer across all buckets
-        self.linear = nn.Linear(features_per_bucket, output_dim, bias=True)
-
-        # Initialize with Kaiming Normal (critical for ReLU/ClippedReLU)
-        self._init_weights(init_type, init_gain)
-
-    def _init_weights(self, init_type: str, gain: float):
-        if init_type == "kaiming_normal":
-            nn.init.kaiming_normal_(self.linear.weight, mode='fan_in', nonlinearity='relu')
-        elif init_type == "kaiming_uniform":
-            nn.init.kaiming_uniform_(self.linear.weight, mode='fan_in', nonlinearity='relu', a=math.sqrt(5))
-        elif init_type == "xavier_normal":
-            nn.init.xavier_normal_(self.linear.weight, gain=gain)
-        elif init_type == "xavier_uniform":
-            nn.init.xavier_uniform_(self.linear.weight, gain=gain)
-        else:
-            nn.init.normal_(self.linear.weight, mean=0.0, std=0.01)
-
-        # Bias initialization
-        if self.linear.bias is not None:
-            nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, 81920) or (batch, 64, 1280)
-        Returns: (batch, 16384) accumulator
-        """
-        batch_size = x.shape[0]
-
-        # Reshape to (batch, 64, 1280) for shared linear
-        if x.dim() == 2:
-            x = x.reshape(batch_size, self.num_buckets, self.features_per_bucket)
-
-        # (batch, 64, 1280) -> (batch * 64, 1280)
-        x_flat = x.reshape(-1, self.features_per_bucket)
-
-        # Shared linear: (batch * 64, 256)
-        acc = self.linear(x_flat)
-
-        # ClippedReLU activation (torch.clamp is faster than custom module)
-        acc = acc.clamp(min=0.0, max=1.0)
-
-        # Reshape back to (batch, 64 * 256) = (batch, 16384)
-        acc = acc.reshape(batch_size, -1)
-
-        return acc
+@dataclass(frozen=True)
+class ModelConfig:
+    l1: int = L1
+    l2: int = L2
+    l3: int = L3
+    layer_stacks: int = LAYER_STACKS
+    psqt_buckets: int = PSQT_BUCKETS
 
 
 class NNUEModel(nn.Module):
-    """
-    Ultra-Optimized NNUE Network for Stockfish.
-    
-    Architecture:
-    - FeatureTransformer: HalfKAv2_hm (shared weights, 64 buckets)
-    - Hidden1: 16384 → 256 (ClippedReLU + Dropout)
-    - Hidden2: 256 → 32 (ClippedReLU + Dropout)
-    - Output: 32 → 1 (centipawns)
-    
-    Total params: ~2.5M trainable
-    """
+    """Trainable float model whose export is a Stockfish 16.1 Small net."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, cfg: ModelConfig = ModelConfig()):
         super().__init__()
-        self.config = config
-        model_cfg = config.get("model", {})
-        self.clipped_relu_max = model_cfg.get("clipped_relu_max", 1.0)
-        self.dropout_p = model_cfg.get("dropout", 0.0)
+        self.cfg = cfg
+        l1, l2, l3, ns, npsqt = cfg.l1, cfg.l2, cfg.l3, cfg.layer_stacks, cfg.psqt_buckets
 
-        # Feature transformer (shared weights)
-        self.feature_transformer = FeatureTransformer(
-            num_buckets=model_cfg.get("num_buckets", 64),
-            features_per_bucket=model_cfg.get("features_per_bucket", 1280),
-            output_dim=model_cfg.get("ft_output", 256),
-            init_type=model_cfg.get("init_type", "kaiming_normal"),
-            init_gain=model_cfg.get("init_gain", 1.0),
-        )
+        # Feature transformer: one shared table for both perspectives.
+        # Row PAD_INDEX is a permanent zero row (padding_idx).
+        self.ft = nn.Parameter(torch.empty(INPUT_DIM + 1, l1 + npsqt))
+        self.ft_bias = nn.Parameter(torch.zeros(l1 + npsqt))
 
-        # Hidden layers - using separate Linear + clamp for torch.compile compatibility
-        self.hidden1_linear = nn.Linear(
-            model_cfg.get("ft_output", 256) * model_cfg.get("num_buckets", 64), 
-            model_cfg.get("hidden1", 256)
-        )
-        self.hidden2_linear = nn.Linear(
-            model_cfg.get("hidden1", 256), 
-            model_cfg.get("hidden2", 32)
-        )
+        self.l1_w = nn.Parameter(torch.empty(ns, l2 + 1, l1))
+        self.l1_b = nn.Parameter(torch.empty(ns, l2 + 1))
+        self.l2_w = nn.Parameter(torch.empty(ns, l3, 2 * l2))
+        self.l2_b = nn.Parameter(torch.empty(ns, l3))
+        self.out_w = nn.Parameter(torch.empty(ns, 1, l3))
+        self.out_b = nn.Parameter(torch.empty(ns, 1))
 
-        # Output layer (no activation - outputs centipawns)
-        self.output_layer = nn.Linear(model_cfg.get("hidden2", 32), model_cfg.get("output_dim", 1))
+        self._init_params()
 
-        # Dropout layers for overfitting prevention
-        self.dropout1 = nn.Dropout(self.dropout_p)
-        self.dropout2 = nn.Dropout(self.dropout_p)
-
-        # Initialize hidden layers with Kaiming
-        self._init_hidden_layers(model_cfg.get("init_type", "kaiming_normal"), model_cfg.get("init_gain", 1.0))
-
-        # EMA model (for evaluation)
-        self.ema_model: Optional[NNUEModel] = None
-        self.ema_decay = config.get("advanced", {}).get("ema", {}).get("decay", 0.9999)
-
-    def set_dropout(self, p: float):
-        """Dynamically adjust dropout probability."""
-        self.dropout_p = p
-        self.dropout1.p = p
-        self.dropout2.p = p
-        print(f"Dropout set to {p}")
-
-    def _init_hidden_layers(self, init_type: str, gain: float):
-        for module in [self.hidden1_linear, self.hidden2_linear, self.output_layer]:
-            if isinstance(module, nn.Linear):
-                if init_type == "kaiming_normal":
-                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                elif init_type == "kaiming_uniform":
-                    nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu', a=math.sqrt(5))
-                elif init_type == "xavier_normal":
-                    nn.init.xavier_normal_(module.weight, gain=gain)
-                elif init_type == "xavier_uniform":
-                    nn.init.xavier_uniform_(module.weight, gain=gain)
-                else:
-                    nn.init.normal_(module.weight, mean=0.0, std=0.01)
-
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, 81920) dense features
-        Returns: (batch, 1) centipawn evaluation
-        """
-        # Feature transformer: (batch, 81920) -> (batch, 16384)
-        x = self.feature_transformer(x)
-
-        # Hidden layers with inline ClippedReLU + Dropout (faster, torch.compile friendly)
-        x = self.hidden1_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 256)
-        x = self.dropout1(x)
-        x = self.hidden2_linear(x).clamp(min=0.0, max=self.clipped_relu_max)  # (batch, 32)
-        x = self.dropout2(x)
-
-        # Output
-        x = self.output_layer(x)  # (batch, 1)
-
-        return x
-
-    def compile_model(self, mode: str = "max-autotune") -> "NNUEModel":
-        """Compile model with torch.compile for speed.
-        
-        Returns the compiled model (caller must reassign):
-            model = model.compile_model()
-        """
-        if hasattr(torch, 'compile'):
-            try:
-                # torch.compile returns a new _OrigMod wrapper; must return it
-                compiled = torch.compile(self, mode=mode, fullgraph=False)
-                print(f"Model compiled with torch.compile(mode={mode})")
-                return compiled
-            except Exception as e:
-                print(f"torch.compile failed: {e}")
-        return self
-
-    def get_num_parameters(self) -> int:
-        """Get number of trainable parameters."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-    def create_ema(self) -> "NNUEModel":
-        """Create EMA copy of the model."""
-        ema_model = NNUEModel(self.config)
-        # Strip _orig_mod. prefix if self is a compiled model.
-        # Also strip ema_model.* prefix: state_dict() includes EMA submodule
-        # params if create_ema() was already called, and a fresh EMA model
-        # has no ema_model submodule, so those keys would mismatch.
-        state = self.state_dict()
-        clean_state = {}
-        for k, v in state.items():
-            clean_key = k
-            if k.startswith('_orig_mod.'):
-                clean_key = k.replace('_orig_mod.', '', 1)
-            if clean_key.startswith('ema_model.'):
-                clean_key = clean_key.replace('ema_model.', '', 1)
-            clean_state[clean_key] = v
-        ema_model.load_state_dict(clean_state)
-        ema_model.eval()
-        for param in ema_model.parameters():
-            param.requires_grad = False
-        self.ema_model = ema_model
-        return ema_model
-
-    def update_ema(self, decay: Optional[float] = None):
-        """Update EMA model parameters."""
-        if self.ema_model is None:
-            return
-
-        decay = decay or self.ema_decay
+    def _init_params(self) -> None:
+        cfg = self.cfg
+        l1, l2, l3, ns = cfg.l1, cfg.l2, cfg.l3, cfg.layer_stacks
+        sigma = math.sqrt(1.0 / INPUT_DIM)
         with torch.no_grad():
-            # Match parameters by NAME (not position) to avoid silent EMA corruption
-            # if parameter registration order ever differs between model and EMA copy.
-            ema_params = dict(self.ema_model.named_parameters())
-            params = dict(self.named_parameters(recurse=True))
-            # Strip _orig_mod. prefix from compiled model params so they match
-            # EMA param names (ema_model is never compiled)
-            clean_params = {}
-            for k, v in params.items():
-                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                clean_params[clean_key] = v
-            # Exclude ema_model submodule params from main model (avoid double-counting)
-            clean_params = {k: v for k, v in clean_params.items() if not k.startswith('ema_model.')}
-            common_keys = set(ema_params.keys()) & set(clean_params.keys())
-            if len(common_keys) != len(ema_params) or len(common_keys) != len(clean_params):
-                print(f"  Warning: EMA/model parameter key mismatch: "
-                      f"ema={len(ema_params)}, model={len(clean_params)}, common={len(common_keys)}")
-            for name in common_keys:
-                ema_params[name].mul_(decay).add_(clean_params[name], alpha=1.0 - decay)
+            self.ft.uniform_(-sigma, sigma)
+            self.ft[PAD_INDEX].zero_()
+            self.ft[:INPUT_DIM, l1:] = initial_psqt()
+            self.ft_bias.zero_()  # psqt bias must stay 0 (cancels in inference)
 
-    def forward_ema(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass using EMA model."""
-        if self.ema_model is None:
-            return self.forward(x)
-        self.ema_model.eval()
-        with torch.no_grad():
-            return self.ema_model(x)
+            # Tie all layer stacks at init; they diverge during training.
+            nn.init.kaiming_uniform_(self.l1_w[0], a=math.sqrt(5))
+            for i in range(1, ns):
+                self.l1_w[i].copy_(self.l1_w[0])
+            bound = 1.0 / math.sqrt(l1)
+            self.l1_b[0].uniform_(-bound, bound)
+            for i in range(1, ns):
+                self.l1_b[i].copy_(self.l1_b[0])
+
+            nn.init.kaiming_uniform_(self.l2_w[0], a=math.sqrt(5))
+            for i in range(1, ns):
+                self.l2_w[i].copy_(self.l2_w[0])
+            bound = 1.0 / math.sqrt(2 * l2)
+            self.l2_b[0].uniform_(-bound, bound)
+            for i in range(1, ns):
+                self.l2_b[i].copy_(self.l2_b[0])
+
+            nn.init.kaiming_uniform_(self.out_w[0], a=math.sqrt(5))
+            for i in range(1, ns):
+                self.out_w[i].copy_(self.out_w[0])
+            self.out_b.zero_()
+
+    @property
+    def num_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        stm: torch.Tensor,
+        bucket: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return side-to-move relative evaluation in ``1.0 == 600`` units.
+
+        features: [n, 64] int32 (white 32 | black 32, padded with 22528)
+        stm:      [n] uint8/int (0 = white to move, 1 = black)
+        bucket:   [n] int (0..7), (piece_count - 1) // 4
+        """
+        n = features.shape[0]
+        flat = features.reshape(-1)
+        offsets = torch.arange(
+            0, 2 * n * 32, 32, dtype=torch.long, device=features.device
+        )
+        # 2n bags (one per perspective), each a sum of 32 rows.
+        acc = F.embedding_bag(
+            flat,
+            self.ft,
+            offsets,
+            mode="sum",
+            padding_idx=PAD_INDEX,
+        )  # [2n, l1 + 8]
+        acc = acc.view(n, 2, -1) + self.ft_bias
+
+        l1 = self.cfg.l1
+        value = acc[:, :, :l1]
+        psqt = acc[:, :, l1:]
+
+        us = (1 - stm.to(torch.float32)).unsqueeze(1)  # 1.0 when White to move
+        them = 1.0 - us
+        # Order perspectives side-to-move first, as Stockfish does.
+        l0 = us.unsqueeze(1) * value + them.unsqueeze(1) * value.flip(1)
+        l0 = l0.clamp_(0.0, 1.0)
+
+        half = l1 // 2
+        # Pairwise product, with the quantized 127/128 factor.
+        pair = (l0[:, :, :half] * l0[:, :, half:]) * (127.0 / 128.0)
+        x = pair.reshape(n, l1)
+
+        # Select the layer stack per sample instead of evaluating all 8.
+        w1 = self.l1_w.index_select(0, bucket)  # [n, 16, 128]
+        b1 = self.l1_b.index_select(0, bucket)
+        h = torch.bmm(w1, x.unsqueeze(2)).squeeze(2) + b1  # [n, 16]
+        c = h[:, : self.cfg.l2]
+        skip = h[:, self.cfg.l2]  # [n]
+        a = torch.cat([(c * c) * (127.0 / 128.0), c], dim=1).clamp_(0.0, 1.0)
+
+        w2 = self.l2_w.index_select(0, bucket)  # [n, 32, 30]
+        b2 = self.l2_b.index_select(0, bucket)
+        l2v = torch.bmm(w2, a.unsqueeze(2)).squeeze(2) + b2  # [n, 32]
+        l2v = l2v.clamp_(0.0, 1.0)
+        w3 = self.out_w.index_select(0, bucket)  # [n, 1, 32]
+        b3 = self.out_b.index_select(0, bucket)
+        positional = torch.bmm(w3, l2v.unsqueeze(2)).squeeze(2) + b3  # [n,1]
+        skip_v = skip.unsqueeze(1)
+
+        psqt_idx = bucket.view(n, 1)
+        psqt_v = (psqt[:, 0, :].gather(1, psqt_idx) - psqt[:, 1, :].gather(1, psqt_idx))
+        psqt_v = psqt_v * (us - 0.5)
+
+        return positional + skip_v + psqt_v  # [n,1]
+
+    @torch.no_grad()
+    def clip_weights_(self) -> None:
+        """Clamp to the exact ranges representable by Stockfish's int8 layers."""
+        self.l1_w.clamp_(-MAX_HIDDEN_WEIGHT, MAX_HIDDEN_WEIGHT)
+        self.l2_w.clamp_(-MAX_HIDDEN_WEIGHT, MAX_HIDDEN_WEIGHT)
+        self.out_w.clamp_(-MAX_OUT_WEIGHT, MAX_OUT_WEIGHT)
+        # int16 FT weights: 32767/127 is the representable bound.
+        self.ft.clamp_(-32767.0 / QUANTIZED_ONE, 32767.0 / QUANTIZED_ONE)
+        self.ft[PAD_INDEX].zero_()
+        # PSQT bias must remain exactly zero.
+        self.ft_bias[self.cfg.l1 :].zero_()
 
 
-def create_model(config: Dict[str, Any]) -> NNUEModel:
-    """Factory function to create model from config."""
-    return NNUEModel(config)
+def build_model(**kwargs) -> NNUEModel:
+    return NNUEModel(ModelConfig(**kwargs) if kwargs else ModelConfig())
