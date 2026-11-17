@@ -9,6 +9,7 @@ data:
   repo_type: dataset
   files:
     - fishpack32.relabel-BT4-tf13tune.binpack
+    - wrongIsRight_nodes5000pv2.relabel-BT4-tf13tune.binpack
   cache_dir: ""          # default: /kaggle/working/data on Kaggle, ./data elsewhere
   cycle: true
 
@@ -19,12 +20,14 @@ train:
   lr: 0.001
   lr_min: 0.00005
   warmup_steps: 1000
-  max_steps: 0           # 0 = measure throughput and auto-size to the budget
+  max_steps: 0           # 0 = measure after warmup and auto-size/recalibrate
   min_steps: 100
-  measure_steps: 30
+  measure_steps: 200
+  measure_warmup: 50
   log_every: 50
   checkpoint_minutes: 10
-  compile: false
+  compile: true          # falls back to eager if inductor cannot compile
+  cpu_threads: 0         # 0 = auto (1 per DDP rank on 4 vCPUs)
   seed: 42
   lambda_start: 1.0      # 1.0 = pure search-score loss
   lambda_end: 1.0

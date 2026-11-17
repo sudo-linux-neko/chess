@@ -45,13 +45,15 @@ After changing Rust code, re-run it.
 ## Data
 
 Real binpacks from the `vondele` Hugging Face datasets. The default config uses
-`vondele/master-binpacks_relabel` / `fishpack32.relabel-BT4-tf13tune.binpack`
-(5.9 GB), which fits Kaggle's disk quota:
+two packs (~13.7 GB total) for better diversity while staying inside a 20 GB
+notebook disk:
 
 ```yaml
 data:
   repo: vondele/master-binpacks_relabel
-  files: [fishpack32.relabel-BT4-tf13tune.binpack]
+  files:
+    - fishpack32.relabel-BT4-tf13tune.binpack
+    - wrongIsRight_nodes5000pv2.relabel-BT4-tf13tune.binpack
 ```
 
 Files are downloaded once into `cache_dir` (`/kaggle/working/data` on Kaggle,
@@ -78,13 +80,15 @@ also launch DDP yourself:
 torchrun --nproc_per_node=2 run.py train --config configs/train.yaml
 ```
 
-The run is **time-budgeted**. It measures throughput for the first
-`train.measure_steps` steps and auto-sizes `total_steps` so training ends near
-`train.time_budget_hours`, leaving time for export/upload. Set
-`train.max_steps` to override.
+The run is **time-budgeted** and stops at the wall-clock limit as a safety
+net. Set `train.max_steps` to force a fixed number of steps.
 
-Checkpoints are atomic and store model, optimizer, step, LR schedule, RNG and
-each rank's exact binpack cursor `(file, byte, skip_entries)`. Resume is
+Auto-sizing warms up for 50 steps, measures 200 steps with a GPU sync, and
+periodically extends `total_steps` if throughput rises, so the wall-clock
+budget is actually used. On a fresh multi-GPU run each rank starts on a
+different binpack, mixing datasets immediately. Checkpoints are atomic and
+store model, optimizer, step, LR schedule, RNG and each rank's exact binpack
+cursor `(file, byte, skip_entries)`. Resume is
 bit-exact. Every periodic checkpoint is named with its step, elapsed run time,
 budget left, loss and upload number, e.g.
 `step_0001234_elapsed_02h15m_left_06h45m_loss_0.02413_up_007.pt`.

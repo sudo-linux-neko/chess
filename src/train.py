@@ -46,12 +46,14 @@ class TrainCfg:
     lr: float = 1.0e-3
     lr_min: float = 5.0e-5
     warmup_steps: int = 1000
-    max_steps: int = 0  # 0 = auto-size from the time budget
+    max_steps: int = 0  # 0 = auto-size from the time budget (recalibrates)
     min_steps: int = 100
-    measure_steps: int = 30
+    measure_steps: int = 200
+    measure_warmup: int = 50
     log_every: int = 50
     checkpoint_minutes: float = 10.0
     compile: bool = False
+    cpu_threads: int = 0  # 0 = auto; 1 is usually best with 2 DDP ranks
     seed: int = 42
     lambda_start: float = 1.0
     lambda_end: float = 1.0
@@ -123,6 +125,13 @@ def pick_device(local_rank: int = 0) -> torch.device:
     return torch.device("cpu")
 
 
+def _sync(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device.type == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available():
+        torch.xpu.synchronize()
+
+
 def lr_at(step: int, total: int, cfg: TrainCfg) -> float:
     if cfg.warmup_steps > 0 and step < cfg.warmup_steps:
         return cfg.lr * (step + 1) / cfg.warmup_steps
@@ -148,15 +157,28 @@ def _gather_states(local: dict[str, int], world: int, rank: int) -> list[dict[st
 
 
 def _unwrap(model: nn.Module) -> NNUEModel:
-    return model.module if hasattr(model, "module") else model  # type: ignore[return-value]
+    """Strip DDP and torch.compile wrappers to the real NNUEModel."""
+    while True:
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod  # type: ignore[attr-defined]
+        elif hasattr(model, "module"):
+            model = model.module  # type: ignore[attr-defined]
+        else:
+            return model  # type: ignore[return-value]
 
 
 def run(config: Config, config_path: str | None = None) -> None:
+    if os.environ.get("NNUE_NO_RESUME") == "1":
+        config.checkpoint.resume = False
     world, rank, local_rank = setup_distributed()
     main = rank == 0
     device = pick_device(local_rank)
     torch.manual_seed(config.train.seed + rank)
     t0 = time.monotonic()
+    cpu_threads = config.train.cpu_threads
+    if cpu_threads <= 0:
+        cpu_threads = max(1, (os.cpu_count() or 4) // (2 * max(1, world)))
+    torch.set_num_threads(cpu_threads)
 
     # --- Hugging Face auth/repo (default on; account name is never hardcoded) ---
     hf_token: str | None = None
@@ -177,7 +199,10 @@ def run(config: Config, config_path: str | None = None) -> None:
 
     # --- data (rank 0 downloads, everyone uses the same paths) ---
     if main:
-        print(f"[init] world={world} device={device} torch={torch.__version__}")
+        print(
+            f"[init] world={world} device={device} torch={torch.__version__} "
+            f"cpu_threads={cpu_threads}"
+        )
     if main:
         paths = ensure_files(config.data)
     else:
@@ -195,9 +220,12 @@ def run(config: Config, config_path: str | None = None) -> None:
     model = NNUEModel().to(device)
     if config.train.compile and hasattr(torch, "compile"):
         try:
-            model = torch.compile(model, mode="max-autotune-no-cudagraphs")
+            from torch import _dynamo
+
+            _dynamo.config.suppress_errors = True
+            model = torch.compile(model, mode="default")
             if main:
-                print("[init] torch.compile enabled")
+                print("[init] torch.compile enabled (mode=default)")
         except Exception as e:  # noqa: BLE001
             if main:
                 print(f"[init] torch.compile failed, using eager: {e}")
@@ -218,11 +246,24 @@ def run(config: Config, config_path: str | None = None) -> None:
             if world > 1:
                 dist.barrier()
         if ckpt_path.exists():
-            state = load_checkpoint(ckpt_path, map_location="cpu")
-            _unwrap(model).load_state_dict(state["model"])
-            optimizer.load_state_dict(state["optimizer"])
-            if main:
-                print(f"[init] resumed step {state['step']}/{state['total_steps']} from {ckpt_path}")
+            try:
+                state = load_checkpoint(ckpt_path, map_location="cpu")
+                _unwrap(model).load_state_dict(state["model"])
+                optimizer.load_state_dict(state["optimizer"])
+                if main:
+                    print(
+                        f"[init] resumed step {state['step']}/{state['total_steps']} "
+                        f"from {ckpt_path}"
+                    )
+            except Exception as e:  # noqa: BLE001
+                state = None
+                if main:
+                    bad = ckpt_path.with_suffix(ckpt_path.suffix + ".bad")
+                    try:
+                        os.replace(ckpt_path, bad)
+                    except OSError:
+                        pass
+                    print(f"[init] resume failed ({e}); starting fresh (moved to {bad})")
 
     if world > 1:
         model = nn.parallel.DistributedDataParallel(
@@ -236,9 +277,20 @@ def run(config: Config, config_path: str | None = None) -> None:
         total_steps = config.train.max_steps
 
     data_states = state.get("data_states") if state else None
-    local_state = StreamState.from_any(data_states[rank] if data_states and len(data_states) == world else None)
+    local_state = StreamState.from_any(
+        data_states[rank] if data_states and len(data_states) == world else None
+    )
+    # On a fresh run, start ranks on different files so the global stream mixes
+    # all datasets from the first batch instead of walking them in lockstep.
+    if local_state is None:
+        local_state = StreamState()
+    start_file = rank % len(paths) if len(paths) > 1 else local_state.file_index
     stream = BinpackStream(
-        paths, world_size=world, rank=rank, state=local_state, cycle=config.data.cycle
+        paths,
+        world_size=world,
+        rank=rank,
+        state=StreamState(start_file, local_state.byte_offset, local_state.skip_entries),
+        cycle=config.data.cycle,
     )
 
     uploader = HFUploader(token=hf_token) if (do_upload and main) else None
@@ -328,11 +380,17 @@ def run(config: Config, config_path: str | None = None) -> None:
             f"elapsed={format_duration(elapsed)} left={format_duration(remaining)} "
             f"upload #{upload_index}"
         )
+    auto_steps = config.train.max_steps <= 0
+    budget_seconds = max(0.0, config.train.time_budget_hours * 3600.0)
+    budget_stop = max(1.0, budget_seconds - min(60.0, budget_seconds * 0.05)) if budget_seconds else 0.0
     last_log = time.monotonic()
     last_ckpt = time.monotonic()
-    measure_done = total_steps > 0
+    measure_done = not auto_steps
     measure_t0 = time.monotonic()
     measure_steps_done = 0
+    measure_warmup_done = 0
+    last_recal_t = time.monotonic()
+    last_recal_step = start_step
 
     step = start_step
     model.train()
@@ -345,14 +403,17 @@ def run(config: Config, config_path: str | None = None) -> None:
     while True:
         if total_steps and step >= total_steps:
             break
+        budget_hit = budget_stop > 0 and (time.monotonic() - t0) >= budget_stop
+        stop_now = bool(stop["flag"] or budget_hit)
         if world > 1:
-            box = [bool(stop["flag"])]
+            box = [stop_now if main else False]
             dist.broadcast_object_list(box, src=0)
-            stop["flag"] = bool(box[0])
-        if stop["flag"]:
+            stop_now = bool(box[0])
+        if stop_now:
+            reason = "time_budget" if budget_hit and not stop["flag"] else "interrupted"
             if main:
-                print("[train] signal received, checkpointing")
-            do_checkpoint(step, best_loss, reason="interrupted")
+                print(f"[train] {reason}, checkpointing")
+            do_checkpoint(step, best_loss, reason=reason)
             break
 
         accum_loss = 0.0
@@ -371,7 +432,12 @@ def run(config: Config, config_path: str | None = None) -> None:
 
         if config.train.grad_clip > 0:
             nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip)
-        lr = lr_at(step, total_steps or step + 1, config.train)
+        if total_steps:
+            lr = lr_at(step, total_steps, config.train)
+        elif step < config.train.warmup_steps:
+            lr = config.train.lr * (step + 1) / config.train.warmup_steps
+        else:
+            lr = config.train.lr
         for g in optimizer.param_groups:
             g["lr"] = lr
         optimizer.step()
@@ -379,23 +445,52 @@ def run(config: Config, config_path: str | None = None) -> None:
 
         loss_hist.append(accum_loss)
         step += 1
-        measure_steps_done += 1
 
-        # Auto-size the run once we have a real throughput measurement.
-        if not measure_done and measure_steps_done >= config.train.measure_steps:
-            elapsed = time.monotonic() - measure_t0
-            sps = measure_steps_done / max(elapsed, 1e-9)
-            remaining = config.train.time_budget_hours * 3600.0 - (time.monotonic() - t0)
-            guess = step + max(config.train.min_steps, int(sps * max(0.0, remaining)))
-            total_steps = _broadcast_int(guess, world, rank)
-            measure_done = True
-            measure_t0 = time.monotonic()
-            measure_steps_done = 0
-            if main:
-                print(
-                    f"[train] measured {sps:.2f} steps/s; auto total_steps={total_steps} "
-                    f"({(total_steps - step) * global_batch:,} positions remaining)"
-                )
+        # Auto-size once after a real warmup, then extend if throughput rises.
+        if not measure_done:
+            if measure_warmup_done < config.train.measure_warmup:
+                measure_warmup_done += 1
+            elif measure_steps_done == 0:
+                _sync(device)
+                measure_t0 = time.monotonic()
+                measure_steps_done = 1
+            else:
+                measure_steps_done += 1
+            if measure_steps_done >= config.train.measure_steps:
+                _sync(device)
+                elapsed = time.monotonic() - measure_t0
+                sps = measure_steps_done / max(elapsed, 1e-9)
+                remaining = budget_seconds - (time.monotonic() - t0)
+                guess = step + max(config.train.min_steps, int(sps * max(0.0, remaining)))
+                old = total_steps
+                total_steps = _broadcast_int(guess, world, rank)
+                measure_done = True
+                last_recal_t = time.monotonic()
+                last_recal_step = step
+                if main:
+                    print(
+                        f"[train] measured {sps:.2f} steps/s after warmup; "
+                        f"auto total_steps={total_steps} (was {old or 'auto'}) "
+                        f"({(total_steps - step) * global_batch:,} positions remaining)"
+                    )
+
+        if measure_done and auto_steps and step - last_recal_step >= 5000:
+            now = time.monotonic()
+            dt = now - last_recal_t
+            ds = step - last_recal_step
+            last_recal_t = now
+            last_recal_step = step
+            if dt > 30.0:
+                sps = ds / dt
+                remaining = budget_seconds - (now - t0)
+                target = step + int(sps * max(0.0, remaining))
+                if target > total_steps + 5000:
+                    total_steps = _broadcast_int(target, world, rank)
+                    if main:
+                        print(
+                            f"[train] extended total_steps to {total_steps} "
+                            f"({sps:.2f} steps/s, {max(0.0, remaining)/60:.0f}m left)"
+                        )
 
         if step % config.train.log_every == 0 and main:
             now = time.monotonic()
@@ -418,10 +513,9 @@ def run(config: Config, config_path: str | None = None) -> None:
             do_checkpoint(step, best_loss)
             last_ckpt = time.monotonic()
 
-    if total_steps and step >= total_steps:
-        if main:
-            print(f"[train] finished {step} steps")
-        do_checkpoint(step, best_loss, label="final.pt", reason="final")
+    if main:
+        print(f"[train] stopped at step {step}")
+    do_checkpoint(step, best_loss, label="final.pt", reason="final")
 
     # --- export + verify ---
     if config.export.enabled and main:

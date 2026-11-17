@@ -10,16 +10,22 @@ Free GPU quota is about 30 h/week; one full run is 9 h.
 
 ## 2. Install
 
+The easiest path is the single self-contained cell in `kaggle_single_cell.py`
+(it installs Rust if missing, clones/pulls, builds a wheel, logs in, trains,
+and prints the result). Manual equivalent:
+
 ```bash
 !git clone https://github.com/thisisforlearn/chess-works.git
 %cd chess-works
 
-!pip install -q maturin huggingface_hub pyyaml
-!maturin develop --release -m crates/nnue_core/Cargo.toml
+!curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+!source $HOME/.cargo/env && pip install -q "maturin>=1.7" "huggingface_hub>=0.23" pyyaml
+!source $HOME/.cargo/env && maturin build --release -m crates/nnue_core/Cargo.toml
+!pip install -q --force-reinstall --no-deps crates/nnue_core/target/wheels/nnue_core-*.whl
 ```
 
-Kaggle already ships CUDA PyTorch and numpy. `maturin develop` builds the Rust
-extension (`nnue_core`) against the active Python and can take a few minutes.
+Kaggle already ships CUDA PyTorch and numpy. Building the wheel avoids
+`maturin develop` requiring a virtualenv.
 
 ## 3. Hugging Face upload (default on)
 
@@ -70,13 +76,24 @@ so a restarted session continues from the last uploaded step.
 `--kaggle` starts `torch.distributed.run` with 2 worker processes (one per T4).
 The trainer:
 
-1. downloads `fishpack32.relabel-BT4-tf13tune.binpack` (5.9 GB) to
-   `/kaggle/working/data`;
-2. reads two disjoint, chunk-aligned shards at ~10 Mpos/s per rank;
-3. measures ~30 steps, then auto-sizes `total_steps` to fit
-   `train.time_budget_hours`;
-4. writes `checkpoints/latest.pt` every 10 minutes (atomic);
+1. downloads two binpacks (~13.7 GB total: `fishpack32` and
+   `wrongIsRight_nodes5000pv2`) to `/kaggle/working/data`;
+2. reads two disjoint, chunk-aligned shards at ~10 Mpos/s per rank, with each
+   rank starting on a different pack so both datasets mix from step one;
+3. warms up 50 steps, measures 200 steps, then auto-sizes `total_steps` and
+   periodically extends it so the full `train.time_budget_hours` is used;
+4. writes a descriptive checkpoint every 10 minutes (atomic), keeping only
+   ~2 GB locally;
 5. exports `checkpoints/final.nnue` and verifies it against the float model.
+
+`train.compile: true` uses `torch.compile` (eager fallback on failure).
+`train.cpu_threads: 0` picks 1 Torch thread per DDP rank on 4 vCPUs, leaving
+cores for the Rust I/O/decode threads.
+
+For a clean restart, set `FRESH = True` in the self-contained cell: it deletes
+`/kaggle/working/chess-works/checkpoints` and sets `NNUE_NO_RESUME=1`, so the
+trainer ignores `latest.pt` on Hugging Face too. Set `FRESH = False` only when
+you want to resume from the last uploaded checkpoint.
 
 Adjust `train.batch_size` if you hit OOM. 16384 per GPU is conservative for
 `L1=128`.
@@ -112,6 +129,8 @@ small net in `eval`.
 
 - Only ~7.6 GB system RAM locals are irrelevant here; Kaggle T4 workers have
   more. The Rust stream keeps memory bounded (a few MB of chunks).
-- The budget includes data download and the ~1 min export/verify. Leave
+- The budget includes data download, compile startup, and export/verify. Leave
   `time_budget_hours` at 9.0–9.3, not 12.
+- The two binpacks use ~12.7 GiB; checkpoints add ~2 GiB. Keep the notebook
+  output disk above ~20 GiB free (the UI may show a larger max).
 - The output architecture is **Stockfish 16.1 Small**, not modern master.

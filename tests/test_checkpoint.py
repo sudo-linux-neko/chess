@@ -45,3 +45,15 @@ def test_train_config_uploads_by_default():
     cfg = load_config("configs/train.yaml")
     assert cfg.checkpoint.hf_repo == "neko-i-am-a-cat/chess-nnue"
     assert cfg.checkpoint.upload is True
+
+
+def test_kaggle_train_config_uses_two_packs_and_auto_size():
+    from src.train import load_config
+
+    cfg = load_config("configs/train.yaml")
+    assert len(cfg.data.files) == 2
+    assert cfg.data.files[0].startswith("fishpack32")
+    assert cfg.data.files[1].startswith("wrongIsRight")
+    assert cfg.train.max_steps == 0
+    assert cfg.train.measure_steps >= 100
+    assert cfg.train.compile is True

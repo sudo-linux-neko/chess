@@ -55,3 +55,15 @@ def test_clip_weights_bounds():
     assert m.l2_w.abs().max() <= MAX_HIDDEN_WEIGHT + 1e-6
     assert m.out_w.abs().max() <= MAX_OUT_WEIGHT + 1e-6
     assert m.ft[22528].eq(0).all()
+
+
+def test_unwrap_compile_and_ddp():
+    from types import SimpleNamespace
+
+    from src.train import _unwrap
+
+    m = NNUEModel()
+    compiled = SimpleNamespace(_orig_mod=m)
+    ddp = SimpleNamespace(module=compiled)
+    assert _unwrap(compiled) is m
+    assert _unwrap(ddp) is m

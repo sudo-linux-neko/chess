@@ -16,6 +16,7 @@ from pathlib import Path
 
 REPO = "https://github.com/thisisforlearn/chess-works.git"
 ROOT = Path("/kaggle/working/chess-works")
+FRESH = True  # True = ignore local/HF checkpoints; set False only to resume
 
 
 def run(cmd, **kwargs):
@@ -34,13 +35,21 @@ if (ROOT / ".git").exists():
     run(["git", "-C", str(ROOT), "fetch", "origin"])
     run(["git", "-C", str(ROOT), "reset", "--hard", "origin/master"])
 else:
+    if ROOT.exists():
+        shutil.rmtree(ROOT)
     run(["git", "clone", REPO, str(ROOT)])
 os.chdir(ROOT)
+if FRESH:
+    shutil.rmtree(ROOT / "checkpoints", ignore_errors=True)
+free_gib = shutil.disk_usage(ROOT.parent).free / 2**30
+print(f"Free disk: {free_gib:.1f} GiB", flush=True)
 
 run([sys.executable, "-m", "pip", "install", "-q", "maturin>=1.7", "huggingface_hub>=0.23", "pyyaml>=6"])
 run([sys.executable, "-m", "maturin", "build", "--release", "-m", "crates/nnue_core/Cargo.toml"])
-wheel = sorted((ROOT / "crates/nnue_core/target/wheels").glob("nnue_core-*.whl"))[-1]
-run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "--no-deps", str(wheel)])
+wheels = sorted((ROOT / "crates/nnue_core/target/wheels").glob("nnue_core-*.whl"))
+if not wheels:
+    raise SystemExit("maturin produced no wheel; check the build log above")
+run([sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", "--no-deps", str(wheels[-1])])
 
 from kaggle_secrets import UserSecretsClient
 from huggingface_hub import login, whoami
@@ -53,9 +62,13 @@ os.environ["HF_TOKEN"] = token
 login(token=token, add_to_git_credential=False)
 print("HF account:", whoami()["name"], flush=True)
 
+train_env = os.environ.copy()
+if FRESH:
+    # Ignore latest.pt on the Hub too, not just the local checkpoints directory.
+    train_env["NNUE_NO_RESUME"] = "1"
 run(
     [sys.executable, "run.py", "train", "--config", "configs/train.yaml", "--kaggle"],
-    env=os.environ.copy(),
+    env=train_env,
 )
 net = ROOT / "checkpoints" / "final.nnue"
 if net.exists():
