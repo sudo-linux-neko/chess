@@ -1,174 +1,136 @@
-# Kaggle Training Guide: Ultra-Optimized NNUE Trainer
+# Running on free Kaggle 2x T4 (9 hours)
 
-**Target**: Kaggle Free Tier — 2× T4 GPUs (16 GB each), 12h session, ~20 GB `/kaggle/working`
+## 1. Notebook settings
 
-**Expected Result**: ~3750-3780 CCRL Elo net in ~10 hours
+- Accelerator: **GPU T4 x2**
+- Internet: **On**
+- Persistence: *Files only*
 
----
+Free GPU quota is about 30 h/week; one full run is 9 h.
 
-## 📋 Prerequisites
+## 2. Install
 
-1. **Kaggle Account** — [kaggle.com](https://kaggle.com)
-2. **Hugging Face Token** (for checkpoint uploads) — [hf.co/settings/tokens](https://huggingface.co/settings/tokens) with `write` permission
-3. **GPU Quota** — Verify you have T4 x2 available (Settings → GPU)
+The easiest path is the single self-contained cell in `kaggle_single_cell.py`
+(it installs Rust if missing, clones/pulls, builds a wheel, logs in, trains,
+and prints the result). Manual equivalent:
 
----
+```bash
+!git clone https://github.com/thisisforlearn/chess-works.git
+%cd chess-works
 
-## 🚀 Copy-Paste Commands
+!curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+!source $HOME/.cargo/env && pip install -q "maturin>=1.7" "huggingface_hub>=0.23" pyyaml
+!source $HOME/.cargo/env && maturin build --release -m crates/nnue_core/Cargo.toml
+!pip install -q --force-reinstall --no-deps crates/nnue_core/target/wheels/nnue_core-*.whl
+```
 
-### Step 1: Clone & Install (Run in Cell 1)
+Kaggle already ships CUDA PyTorch and numpy. Building the wheel avoids
+`maturin develop` requiring a virtualenv.
+
+## 3. Hugging Face upload (default on)
+
+Add a Kaggle secret named `HF_TOKEN` (Add-ons -> Secrets) with a **write** token.
+The trainer reads it automatically, and this cell does the same explicitly:
 
 ```python
-# ============================================================
-# ULTRA-OPTIMIZED NNUE TRAINER - KAGGLE 2x T4 (10h)
-# ============================================================
-!git clone https://github.com/sudo-linux-neko/chess.git
-%cd chess
+from kaggle_secrets import UserSecretsClient
+from huggingface_hub import login, whoami
 
-# Install deps (includes PyTorch 2.3+ with CUDA 12.1)
-!pip install -q -r requirements.txt 2>&1 | tail -5
-
-# Verify GPU
-!nvidia-smi -L
-import torch; print(f"PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}, GPUs: {torch.cuda.device_count()}")
+user_secrets = UserSecretsClient()
+login(token=user_secrets.get_secret("HF_TOKEN"), add_to_git_credential=False)
+print("HF account:", whoami()["name"])
 ```
 
-**Wait**: ~2-3 minutes
+The account name is read from the token, never hardcoded. The trainer prints
+`[hf] logged in as <account>` and checks that the target repo owner matches
+that account (or one of its orgs).
 
----
+Defaults in `configs/train.yaml`:
 
-### Step 2: Add HF Token (Required)
-
-1. **Settings** (gear icon ☰) → **Secrets** → **Add new secret**
-2. **Label**: `HF_TOKEN`
-3. **Value**: Your Hugging Face token (needs `write` permission)
-4. **Save**
-
----
-
-### Step 3: Download Data + Compile Loader (Run in Cell 2)
-
-```python
-# ============================================================
-# PREP: Download high-quality Stockfish data + compile loader
-# ============================================================
-!python run.py --config configs/train_ultra.yaml --download-data 2>&1 | tail -20
-!python run.py --config configs/train_ultra.yaml --compile-only 2>&1 | tail -10
+```yaml
+checkpoint:
+  hf_repo: neko-i-am-a-cat/chess-nnue
+  upload: true
+  resume: true
 ```
 
-**Wait**: ~5-15 minutes
-- Downloads ~18 GB from `vondele/*` HF datasets (Stockfish self-play, Leela games, tablebase endgames)
-- Compiles C++ binpack loader (pybind11)
-
----
-
-### Step 4: MAIN TRAINING — 9.5 Hours (Run in Cell 3)
-
-```python
-# ============================================================
-# TRAIN: Full ultra-optimized run (9.5 hours on 2x T4)
-# ============================================================
-!python run.py --config configs/train_ultra.yaml 2>&1 | tee training.log
-```
-
-**This runs ~10 hours**. You can:
-- Close browser — Kaggle keeps it running
-- Check `training.log` in Files panel for progress
-- Checkpoints every 10 min to `/kaggle/working/checkpoints/`
-- Auto-uploads to HF Hub (if token set)
-
----
-
-### Step 5: Get Your .nnue (Run After Training)
-
-```python
-# ============================================================
-# EXPORT: Already done automatically, but verify manually
-# ============================================================
-!ls -lh /kaggle/working/export/
-!python run.py --config configs/train_ultra.yaml --verify-export 2>&1 | tail -20
-```
-
-**Your net**: `/kaggle/working/export/nn-<hash>.nnue` (~10 MB)
-
----
-
-### Step 6: Download & Use in Stockfish
-
-1. In Kaggle **Files panel** (left sidebar): navigate to `working/export/`
-2. Right-click `nn-*.nnue` → **Download**
-3. Copy to Stockfish nnue folder:
-   - **Linux**: `~/.local/share/stockfish/nnue/`
-   - **Windows**: `%APPDATA%\Stockfish\nnue\`
-   - **macOS**: `~/Library/Application Support/Stockfish/nnue/`
-4. In Stockfish UCI: `setoption name EvalFile value nn-<hash>.nnue`
-
----
-
-## 🔁 If Session Crashes / You Restart
-
-```python
-# Auto-resumes from latest checkpoint (local or HF Hub)
-!python run.py --config configs/train_ultra.yaml 2>&1 | tee -a training.log
-```
-
----
-
-## 📋 Quick Commands Reference
-
-| Command | Purpose |
-|---------|---------|
-| `--smoke-test` | 2-min pipeline verification |
-| `--benchmark` | Throughput benchmark (no training) |
-| `--export-only` | Export latest checkpoint to .nnue |
-| `--verify-export` | Verify .nnue matches PyTorch |
-| `--build-rust` | Build Rust SIMD loader (experimental) |
-| `--compile-only` | Only compile C++ loader |
-| `--download-data` | Only download training data |
-
----
-
-## ⚠️ Troubleshooting
-
-| Issue | Fix |
-|-------|-----|
-| **C++ compile fails** | `!apt-get update && apt-get install -y cmake g++ pybind11-dev` |
-| **OOM on T4** | Batch is 65K (micro 8K × 8 accum) — fits 16 GB VRAM |
-| **No HF token** | Checkpoints save locally only; no cloud backup |
-| **Slow download** | First run downloads ~18 GB; subsequent runs use cache |
-| **Session dies at 12h** | Trainer handles SIGTERM — resumes on re-run |
-
----
-
-## 📊 Expected Output
+Uploads (background thread, never block training):
 
 ```
-TRAINING COMPLETE
-Final model: /kaggle/working/export/nn-a1b2c3d4.nnue
-Total time: 9.7 hours
-Steps: 5,108,000
-Verification: PASSED (MAE=0.006 cp, Max=0.23 cp)
+checkpoints/step_0001234_elapsed_02h15m_left_06h45m_loss_0.02413_up_007.pt
+latest.pt
+training_state.json
+final.pt
+final.nnue
 ```
 
----
+With `resume: true`, a missing local checkpoint is downloaded from the repo,
+so a restarted session continues from the last uploaded step.
 
-## 🏗️ Architecture Summary
+## 4. Train
 
-| Component | Spec |
-|-----------|------|
-| **Features** | HalfKAv2_hm (64×1280 = 81,920) |
-| **Network** | FT(256 shared) → L1(256) → L2(32) → Out(1) |
-| **Params** | ~2.5M |
-| **Batch** | 65,536 (8,192 micro × 8 accum) |
-| **LR Schedule** | One-Cycle (0.0008, 5.1M steps, 5% warmup) |
-| **Lambda** | Cosine jitter (δ=-0.3, sample/batch jitter) |
-| **Data** | vondele T60-T70, master-binpacks, Leela, tablebase |
-| **Quantization** | Per-channel symmetric int8 (Stockfish format) |
+```bash
+!python run.py train --config configs/train.yaml --kaggle
+```
 
----
+`--kaggle` starts `torch.distributed.run` with 2 worker processes (one per T4).
+The trainer:
 
-## 📄 License
+1. downloads two binpacks (~13.7 GB total: `fishpack32` and
+   `wrongIsRight_nodes5000pv2`) to `/kaggle/working/data`;
+2. reads two disjoint, chunk-aligned shards at ~10 Mpos/s per rank, with each
+   rank starting on a different pack so both datasets mix from step one;
+3. warms up 50 steps, measures 200 steps, then auto-sizes `total_steps` and
+   periodically extends it so the full `train.time_budget_hours` is used;
+4. writes a descriptive checkpoint every 10 minutes (atomic), keeping only
+   ~2 GB locally;
+5. exports `checkpoints/final.nnue` and verifies it against the float model.
 
-**GPL-3.0-or-later** — Copyright (C) 2026 Vaibhav
+`train.compile: true` uses `torch.compile` (eager fallback on failure).
+`train.cpu_threads: 0` picks 1 Torch thread per DDP rank on 4 vCPUs, leaving
+cores for the Rust I/O/decode threads.
 
-See [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
+For a clean restart, set `FRESH = True` in the self-contained cell: it deletes
+`/kaggle/working/chess-works/checkpoints` and sets `NNUE_NO_RESUME=1`, so the
+trainer ignores `latest.pt` on Hugging Face too. Set `FRESH = False` only when
+you want to resume from the last uploaded checkpoint.
+
+Adjust `train.batch_size` if you hit OOM. 16384 per GPU is conservative for
+`L1=128`.
+
+## 5. Finish and download
+
+At the end of the run:
+
+```
+checkpoints/step_*_elapsed_*_left_*_loss_*_up_*.pt   periodic checkpoints
+checkpoints/latest.pt                              resumable alias
+checkpoints/final.pt                               final checkpoint
+checkpoints/final.nnue                             Stockfish 16.1 Small net
+checkpoints/training_state.json                    account/step/loss/ETA
+```
+
+Copy `final.nnue` to `/kaggle/working/` (or let the HF uploader handle it) and
+download it from the notebook output.
+
+## 6. Verify with Stockfish 16.1
+
+```bash
+!git clone --depth 1 --branch sf_16.1 https://github.com/official-stockfish/Stockfish.git /tmp/sf
+!cd /tmp/sf/src && make -j2 build ARCH=x86-64-avx2
+!printf 'setoption name EvalFileSmall value /kaggle/working/chess-works/checkpoints/final.nnue\nposition startpos\neval\nquit\n' | /tmp/sf/src/stockfish
+```
+
+A normal Stockfish 16.1 binary only selects the small net in lopsided
+positions. `scripts/build_stockfish.sh` builds a parity binary that forces the
+small net in `eval`.
+
+## Notes
+
+- Only ~7.6 GB system RAM locals are irrelevant here; Kaggle T4 workers have
+  more. The Rust stream keeps memory bounded (a few MB of chunks).
+- The budget includes data download, compile startup, and export/verify. Leave
+  `time_budget_hours` at 9.0–9.3, not 12.
+- The two binpacks use ~12.7 GiB; checkpoints add ~2 GiB. Keep the notebook
+  output disk above ~20 GiB free (the UI may show a larger max).
+- The output architecture is **Stockfish 16.1 Small**, not modern master.

@@ -1,564 +1,244 @@
 # Copyright (C) 2026 Vaibhav
 # SPDX-License-Identifier: GPL-3.0-or-later
+"""Atomic checkpoints + optional background Hugging Face upload.
 
-"""
-Ultra-Optimized Checkpoint Management.
-
-Features:
-- Atomic writes with .tmp rename pattern
-- Full state restoration (model, optimizer, scheduler, scaler, RNG, data position)
-- Keep-last-N + keep-best-N rotation
-- Metadata tracking (step, loss, time, git sha)
-- Background upload queue integration
-- Corruption detection with SHA256
+Resume is exact: model, optimizer, step counters, LR schedule, RNG state and
+each rank's binpack (file, chunk, entry) cursor are stored together.
 """
 
-import os
+from __future__ import annotations
+
 import json
-import hashlib
+import os
+import queue
+import shutil
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from typing import Any
 
 import torch
-import torch.nn as nn
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600:02d}h{(seconds % 3600) // 60:02d}m"
+
+
+def checkpoint_name(
+    step: int,
+    elapsed_s: float,
+    remaining_s: float,
+    loss: float,
+    upload_index: int,
+    reason: str = "periodic",
+) -> str:
+    """Human-readable checkpoint name with run time, budget left, loss, upload #."""
+    suffix = "" if reason == "periodic" else f"_{reason}"
+    return (
+        f"step_{step:07d}"
+        f"_elapsed_{format_duration(elapsed_s)}"
+        f"_left_{format_duration(remaining_s)}"
+        f"_loss_{loss:.5f}"
+        f"_up_{upload_index:03d}{suffix}.pt"
+    )
+
+
+def atomic_save(obj: Any, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def save_checkpoint(
+    path: str | Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    total_steps: int,
+    data_states: list[dict[str, int]],
+    config: dict[str, Any],
+    best_loss: float = float("inf"),
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload = {
+        "format": 2,
+        "author": "Vaibhav",
+        "license": "GPL-3.0-or-later",
+        "created": int(time.time()),
+        "model": _strip_compile_prefix(
+            (model.module if hasattr(model, "module") else model).state_dict()
+        ),
+        "optimizer": optimizer.state_dict(),
+        "step": step,
+        "total_steps": total_steps,
+        "data_states": data_states,
+        "config": config,
+        "best_loss": best_loss,
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    if extra:
+        payload.update(extra)
+    atomic_save(payload, path)
+
+
+def _strip_compile_prefix(sd: dict[str, Any]) -> dict[str, Any]:
+    return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
+
+
+def load_checkpoint(path: str | Path, map_location="cpu") -> dict[str, Any]:
+    obj = torch.load(path, map_location=map_location, weights_only=False)
+    if not isinstance(obj, dict) or obj.get("format") != 2:
+        raise ValueError(f"not a v2 trainer checkpoint: {path}")
+    obj["model"] = _strip_compile_prefix(obj["model"])
+    return obj
+
+
+def resolve_hf_token() -> str | None:
+    """Token precedence: env -> Kaggle secret -> local ``hf auth login``."""
+    for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        token = os.environ.get(key)
+        if token:
+            return token
+    try:
+        from kaggle_secrets import UserSecretsClient  # type: ignore
+
+        token = UserSecretsClient().get_secret("HF_TOKEN")
+        if token:
+            return token
+    except Exception:  # noqa: BLE001 - not running on Kaggle
+        pass
+    try:
+        from huggingface_hub import get_token
+
+        return get_token()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def prepare_hf(
+    repo_id: str,
+    repo_type: str = "model",
+    token: str | None = None,
+):
+    """Authenticate, print the real account name, and ensure the repo exists."""
+    from huggingface_hub import HfApi, login, whoami
+
+    tok = token or resolve_hf_token()
+    if not tok:
+        raise RuntimeError(
+            "HF upload is enabled but no token was found. Set HF_TOKEN, add a "
+            "Kaggle secret named HF_TOKEN, or run `hf auth login`."
+        )
+    login(token=tok, add_to_git_credential=False)
+    me = whoami(token=tok)
+    account = str(me.get("name") or "?")
+    orgs = {str(o.get("name")) for o in me.get("orgs", [])}
+    owner = repo_id.split("/", 1)[0]
+    print(f"[hf] logged in as {account}")
+    print(f"[hf] target repo {repo_id}")
+    if owner != account and owner not in orgs:
+        print(
+            f"[hf] WARNING: repo owner '{owner}' is neither '{account}' nor one "
+            f"of its orgs {sorted(orgs)}"
+        )
+    api = HfApi(token=tok)
+    url = api.create_repo(repo_id, repo_type=repo_type, exist_ok=True, private=False)
+    print(f"[hf] repo ready: {url}")
+    return api, tok, account
+
+
+def try_download_checkpoint(
+    local_path: str | Path,
+    repo_id: str,
+    filename: str,
+    repo_type: str = "model",
+) -> str | None:
+    """Download a checkpoint from HF if it is not already present locally."""
+    local = Path(local_path)
+    if local.exists():
+        return str(local)
+    try:
+        from huggingface_hub import hf_hub_download
+
+        got = hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if Path(got).resolve() != local.resolve():
+            shutil.copy2(got, local)
+        return str(local)
+    except Exception as e:  # noqa: BLE001
+        print(f"[hf] no checkpoint to resume ({e})")
+        return None
 
 
 @dataclass
-class CheckpointMetadata:
-    """Metadata for a checkpoint."""
-    step: int
-    epoch: int
-    samples_seen: int
-    train_loss: float
-    val_loss: float
-    best_val_loss: float
-    learning_rate: float
-    lambda_val: float
-    time_elapsed: float
-    timestamp: str
-    git_sha: Optional[str] = None
-    config_hash: Optional[str] = None
-    file_sha256: Optional[str] = None
+class _UploadJob:
+    local: str
+    repo_id: str
+    path_in_repo: str
+    repo_type: str
 
 
-class CheckpointManager:
-    """
-    Manages training checkpoints with atomic writes and rotation.
-    
-    Features:
-    - Atomic writes: write to .tmp, fsync, rename
-    - Keep-last-N: always keep N most recent
-    - Keep-best-N: keep N best by validation loss
-    - Metadata sidecar: .meta.json for quick inspection
-    - Corruption detection: SHA256 verification
-    - Exact resume: full state including RNG and data position
-    """
+class HFUploader:
+    """Single background thread; never blocks the training step."""
 
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        ckpt_cfg = config.get("checkpoint", {})
+    def __init__(self, token: str | None = None) -> None:
+        from huggingface_hub import HfApi
 
-        self.checkpoint_dir = Path(ckpt_cfg.get("dir", "/kaggle/working/checkpoints"))
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.api = HfApi(token=token)
+        self.q: queue.Queue[_UploadJob | None] = queue.Queue(maxsize=32)
+        self.thread = threading.Thread(target=self._run, daemon=True, name="hf-upload")
+        self.thread.start()
 
-        self.keep_last_n = ckpt_cfg.get("keep_last_n", 5)
-        self.keep_best_n = ckpt_cfg.get("keep_best_n", 3)
-        # Support both naming conventions for robustness: "include_*" (tests, CLI)
-        # and "save_*" (internal). "include_*" takes precedence if both are set.
-        self.save_optimizer = ckpt_cfg.get("include_optimizer", ckpt_cfg.get("save_optimizer", True))
-        self.save_scheduler = ckpt_cfg.get("include_scheduler", ckpt_cfg.get("save_scheduler", True))
-        self.save_scaler = ckpt_cfg.get("include_scaler", ckpt_cfg.get("save_scaler", True))
-        self.save_rng = ckpt_cfg.get("include_rng", ckpt_cfg.get("save_rng", True))
-        self.save_data_state = ckpt_cfg.get("include_data_position", ckpt_cfg.get("save_data_state", True))
-        self.atomic_writes = ckpt_cfg.get("include_atomic_write", ckpt_cfg.get("atomic_writes", ckpt_cfg.get("atomic_write", True)))
+    def submit(self, local: str, repo_id: str, path_in_repo: str, repo_type: str = "model") -> None:
+        job = _UploadJob(local, repo_id, path_in_repo, repo_type)
+        try:
+            self.q.put_nowait(job)
+        except queue.Full:
+            print("[hf] upload queue full, skipping this checkpoint upload")
 
-        self._lock = threading.Lock()
-
-    def save_checkpoint(
-        self,
-        model: nn.Module,
-        optimizer: Optional[Optimizer],
-        scheduler: Optional[LRScheduler],
-        scaler: Optional[torch.cuda.amp.GradScaler],
-        training_state: Any,
-        config: Dict[str, Any],
-        data_state: Optional[Dict[str, Any]] = None,
-        ema_model: Optional[nn.Module] = None,
-        is_best: bool = False,
-        suffix: str = "",
-    ) -> Optional[Path]:
-        """Save complete training checkpoint atomically."""
-        with self._lock:
-            step = int(getattr(training_state, 'step', 0))
-            timestamp = datetime.now(timezone.utc).isoformat() + 'Z'
-
-            # Prepare state dict
-            state = {
-                "model": model.state_dict(),
-                "training_state": self._serialize_training_state(training_state),
-                "config": config,
-                "timestamp": timestamp,
-                "step": step,
-            }
-
-            # Strip _orig_mod. prefix from torch.compile models for compatibility
-            # when loading into non-compiled models (and vice versa)
-            if "model" in state:
-                clean_model_state = {}
-                for k, v in state["model"].items():
-                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                    clean_model_state[clean_key] = v
-                state["model"] = clean_model_state
-
-            # Optional components
-            if self.save_optimizer and optimizer is not None:
-                try:
-                    state["optimizer"] = optimizer.state_dict()
-                except Exception as e:
-                    print(f"  Warning: Could not save optimizer state: {e}")
-            if self.save_scheduler and scheduler is not None:
-                try:
-                    state["scheduler"] = scheduler.state_dict()
-                except Exception as e:
-                    print(f"  Warning: Could not save scheduler state: {e}")
-            if self.save_scaler and scaler is not None:
-                try:
-                    state["scaler"] = scaler.state_dict()
-                except Exception as e:
-                    print(f"  Warning: Could not save scaler state: {e}")
-            if self.save_rng:
-                try:
-                    state["rng"] = self._get_rng_state()
-                except Exception as e:
-                    print(f"  Warning: Could not save RNG state: {e}")
-            if self.save_data_state and data_state is not None:
-                state["data_state"] = data_state
-            if ema_model is not None:
-                try:
-                    ema_state = ema_model.state_dict()
-                    # Strip _orig_mod. prefix for compatibility (in case ema_model is compiled)
-                    clean_ema_state = {}
-                    for k, v in ema_state.items():
-                        clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                        clean_ema_state[clean_key] = v
-                    state["ema_model"] = clean_ema_state
-                except Exception as e:
-                    print(f"  Warning: Could not save EMA state: {e}")
-
-            # Generate filename
-            if is_best:
-                filename = f"best{suffix}.pt"
-            else:
-                filename = f"step_{step:08d}{suffix}.pt"
-
-            tmp_path = self.checkpoint_dir / f"{filename}.tmp"
-            final_path = self.checkpoint_dir / filename
-
+    def _run(self) -> None:
+        while True:
+            job = self.q.get()
+            if job is None:
+                return
             try:
-                # Atomic write
-                if self.atomic_writes:
-                    self._atomic_save(state, tmp_path, final_path)
-                else:
-                    torch.save(state, final_path)
-
-                # Compute SHA256
-                file_sha256 = self._compute_sha256(final_path)
-
-                # Create metadata
-                _tl = getattr(training_state, 'train_losses', None)
-                _vl = getattr(training_state, 'val_losses', None)
-                _lh = getattr(training_state, 'lambda_history', None)
-                metadata = CheckpointMetadata(
-                    step=step,
-                    epoch=getattr(training_state, 'epoch', 0),
-                    samples_seen=getattr(training_state, 'samples_seen', 0),
-                    train_loss=_tl[-1] if _tl else 0,
-                    val_loss=_vl[-1] if _vl else 0,
-                    best_val_loss=getattr(training_state, 'best_val_loss', float('inf')),
-                    learning_rate=optimizer.param_groups[0]['lr'] if optimizer and len(optimizer.param_groups) > 0 else 0,
-                    lambda_val=_lh[-1] if _lh else 0,
-                    time_elapsed=getattr(training_state, 'time_elapsed', 0),
-                    timestamp=timestamp,
-                    git_sha=self._get_git_sha(),
-                    config_hash=self._hash_config(config),
-                    file_sha256=file_sha256,
+                self.api.upload_file(
+                    path_or_fileobj=job.local,
+                    path_in_repo=job.path_in_repo,
+                    repo_id=job.repo_id,
+                    repo_type=job.repo_type,
                 )
+                print(f"[hf] uploaded {job.path_in_repo}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[hf] upload failed: {e}")
+            finally:
+                self.q.task_done()
 
-                # Save metadata sidecar
-                meta_path = final_path.with_suffix('.meta.json')
-                with open(meta_path, 'w') as f:
-                    json.dump(asdict(metadata), f, indent=2)
-
-                # Rotation
-                self._rotate_checkpoints(is_best)
-
-                print(f"Checkpoint saved: {final_path} (step={step}, sha256={file_sha256[:16]}...)")
-                return final_path
-
-            except Exception as e:
-                print(f"Checkpoint save failed: {e}")
-                if tmp_path.exists():
-                    tmp_path.unlink(missing_ok=True)
-                return None
-
-    def _atomic_save(self, state: Dict, tmp_path: Path, final_path: Path):
-        """Save to temp file, fsync, then atomic rename."""
-        torch.save(state, tmp_path)
-        # Ensure data is durable on disk before rename
+    def close(self, wait: bool = True) -> None:
+        if wait:
+            self.q.join()
         try:
-            with open(tmp_path, 'rb') as f:
-                os.fsync(f.fileno())
-        except Exception:
-            pass  # fsync best-effort; atomic rename still protects against corruption
-        # Atomic rename
-        tmp_path.rename(final_path)
-        # Fsync directory to ensure rename is durable
-        try:
-            dir_fd = os.open(str(self.checkpoint_dir), os.O_RDONLY)
-            os.fsync(dir_fd)
-            os.close(dir_fd)
-        except Exception:
+            self.q.put(None, timeout=1)
+        except queue.Full:
             pass
 
-    def _serialize_training_state(self, training_state: Any) -> Dict:
-        """Serialize training state to dict."""
-        if hasattr(training_state, '__dict__'):
-            return {k: v for k, v in training_state.__dict__.items() 
-                   if not k.startswith('_')}
-        return dict(training_state) if isinstance(training_state, dict) else {}
 
-    def _get_rng_state(self) -> Dict:
-        """Get all RNG states for exact reproducibility."""
-        return {
-            "torch": torch.get_rng_state(),
-            "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            "numpy": __import__('numpy').random.get_state(),
-            "python": __import__('random').getstate(),
-        }
-
-    def _set_rng_state(self, state: Dict):
-        """Restore all RNG states."""
-        if state.get("torch") is not None:
-            torch.set_rng_state(state["torch"])
-        if state.get("torch_cuda") is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["torch_cuda"])
-        if state.get("numpy") is not None:
-            __import__('numpy').random.set_state(state["numpy"])
-        if state.get("python") is not None:
-            __import__('random').setstate(state["python"])
-
-    def _compute_sha256(self, filepath: Path) -> str:
-        """Compute SHA256 of file."""
-        sha256 = hashlib.sha256()
-        with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-
-    def _verify_sha256(self, filepath: Path, expected: str) -> bool:
-        """Verify file integrity."""
-        return self._compute_sha256(filepath) == expected
-
-    def _get_git_sha(self) -> Optional[str]:
-        """Get current git commit SHA."""
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
-
-    def _hash_config(self, config: Dict) -> str:
-        """Hash config for reproducibility tracking."""
-        import yaml
-        config_str = yaml.dump(config, sort_keys=True)
-        return hashlib.sha256(config_str.encode()).hexdigest()[:16]
-
-    def _rotate_checkpoints(self, is_best: bool = False):
-        """Rotate checkpoints: keep last N + best N."""
-        # Get all checkpoint files with robust step parsing
-        def _step_from_path(p: Path) -> int:
-            try:
-                return int(p.stem.split('_')[1])
-            except (IndexError, ValueError):
-                return -1
-        
-        checkpoints = sorted(
-            [p for p in self.checkpoint_dir.glob("step_*.pt") if _step_from_path(p) >= 0],
-            key=_step_from_path,
-        )
-        best_checkpoints = sorted(
-            self.checkpoint_dir.glob("best*.pt"),
-            key=lambda p: self._get_val_loss(p),
-        )
-
-        # Remove old step checkpoints
-        while len(checkpoints) > self.keep_last_n:
-            old = checkpoints.pop(0)
-            old.unlink(missing_ok=True)
-            old.with_suffix('.meta.json').unlink(missing_ok=True)
-
-        # Remove old best checkpoints (keep only best N)
-        while len(best_checkpoints) > self.keep_best_n:
-            old = best_checkpoints.pop(-1)  # Remove worst
-            old.unlink(missing_ok=True)
-            old.with_suffix('.meta.json').unlink(missing_ok=True)
-
-    def _get_val_loss(self, path: Path) -> float:
-        """Get validation loss from metadata."""
-        meta_path = path.with_suffix('.meta.json')
-        if meta_path.exists():
-            with open(meta_path) as f:
-                return json.load(f).get('val_loss', float('inf'))
-        return float('inf')
-
-    def load_checkpoint(
-        self,
-        path: Union[str, Path],
-        model: nn.Module,
-        optimizer: Optional[Optimizer] = None,
-        scheduler: Optional[LRScheduler] = None,
-        scaler: Optional[torch.cuda.amp.GradScaler] = None,
-        training_state: Optional[Any] = None,
-        data_state: Optional[Dict] = None,
-        ema_model: Optional[nn.Module] = None,
-        strict: bool = True,
-    ) -> Dict[str, Any]:
-        """Load checkpoint with full state restoration."""
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-
-        # Verify integrity (only if SHA256 was recorded)
-        meta_path = path.with_suffix('.meta.json')
-        if meta_path.exists():
-            with open(meta_path) as f:
-                metadata = json.load(f)
-            expected_sha = metadata.get('file_sha256', '')
-            if expected_sha and not self._verify_sha256(path, expected_sha):
-                raise RuntimeError(f"Checkpoint corruption detected: {path}")
-
-        print(f"Loading checkpoint: {path}")
-        # PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints
-        # containing numpy arrays, TrainingState objects, etc. Use False since
-        # we only load our own checkpoints (trusted source).
-        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-
-        # Load model - strip _orig_mod. prefix for compatibility with compiled/uncompiled models
-        model_state = checkpoint.get("model")
-        if model_state:
-            clean_model_state = {}
-            for k, v in model_state.items():
-                clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                clean_model_state[clean_key] = v
-            model.load_state_dict(clean_model_state, strict=strict)
-
-        # Load optimizer
-        if optimizer is not None and "optimizer" in checkpoint:
-            try:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            except Exception as e:
-                print(f"  Warning: Could not restore optimizer state: {e}")
-
-        # Load scheduler
-        if scheduler is not None and "scheduler" in checkpoint:
-            try:
-                scheduler.load_state_dict(checkpoint["scheduler"])
-            except Exception as e:
-                print(f"  Warning: Could not restore scheduler state: {e}")
-
-        # Load scaler
-        if scaler is not None and "scaler" in checkpoint:
-            try:
-                scaler.load_state_dict(checkpoint["scaler"])
-            except Exception as e:
-                print(f"  Warning: Could not restore scaler state: {e}")
-
-        # Load RNG
-        if "rng" in checkpoint:
-            try:
-                self._set_rng_state(checkpoint["rng"])
-            except Exception as e:
-                print(f"  Warning: Could not restore RNG state: {e}")
-
-        # Load EMA
-        if ema_model is not None and "ema_model" in checkpoint:
-            try:
-                ema_state = checkpoint["ema_model"]
-                # Strip _orig_mod. prefix for compatibility with compiled models
-                clean_ema_state = {}
-                for k, v in ema_state.items():
-                    clean_key = k.replace('_orig_mod.', '', 1) if k.startswith('_orig_mod.') else k
-                    clean_ema_state[clean_key] = v
-                ema_model.load_state_dict(clean_ema_state)
-            except Exception as e:
-                print(f"  Warning: Could not restore EMA state: {e}")
-
-        # Return training state and data state for manual restoration
-        result = {
-            "training_state": checkpoint.get("training_state", {}),
-            "data_state": checkpoint.get("data_state", {}),
-            "config": checkpoint.get("config", {}),
-            "step": checkpoint.get("step", 0),
-            "optimizer_state": checkpoint.get("optimizer", {}),
-            "scheduler_state": checkpoint.get("scheduler", {}),
-            "ema_state_dict": checkpoint.get("ema_state_dict", checkpoint.get("ema_model", {})),
-        }
-
-        if training_state is not None and "training_state" in checkpoint:
-            self._restore_training_state(training_state, checkpoint["training_state"])
-
-        if data_state is not None and "data_state" in checkpoint:
-            data_state.update(checkpoint["data_state"])
-
-        print(f"Checkpoint loaded: step={result['step']}")
-        return result
-
-    def _restore_training_state(self, training_state: Any, state_dict: Dict):
-        """Restore training state from dict."""
-        for key, value in state_dict.items():
-            if hasattr(training_state, key):
-                setattr(training_state, key, value)
-
-    def find_latest_checkpoint(self) -> Optional[Path]:
-        """Find most recent checkpoint by step number."""
-        checkpoints = list(self.checkpoint_dir.glob("step_*.pt"))
-        if not checkpoints:
-            return None
-        def _step_from_path(p: Path) -> int:
-            try:
-                return int(p.stem.split('_')[1])
-            except (IndexError, ValueError):
-                return -1
-        valid = [p for p in checkpoints if _step_from_path(p) >= 0]
-        if not valid:
-            return None
-        return max(valid, key=_step_from_path)
-
-    def find_best_checkpoint(self) -> Optional[Path]:
-        """Find best checkpoint by validation loss."""
-        checkpoints = list(self.checkpoint_dir.glob("best*.pt"))
-        if not checkpoints:
-            return None
-        return min(checkpoints, key=self._get_val_loss)
-
-    def list_checkpoints(self) -> List[Dict[str, Any]]:
-        """List all checkpoints with metadata."""
-        result = []
-        for ckpt in sorted(self.checkpoint_dir.glob("*.pt")):
-            meta_path = ckpt.with_suffix('.meta.json')
-            if meta_path.exists():
-                with open(meta_path) as f:
-                    result.append(json.load(f))
-            else:
-                # Robust step parsing with try/except for malformed filenames
-                try:
-                    step = int(ckpt.stem.split('_')[1]) if '_' in ckpt.stem else 0
-                except (IndexError, ValueError):
-                    step = 0
-                result.append({
-                    "path": str(ckpt),
-                    "step": step,
-                    "size_mb": ckpt.stat().st_size / 1024**2,
-                })
-        return result
+def write_json(path: str | Path, payload: dict[str, Any]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
-def find_resumable_checkpoint(config: Dict, hf_uploader: Any) -> Optional[Path]:
-    """Find the best checkpoint to resume from (local or HF)."""
-    checkpoint_manager = CheckpointManager(config)
-    local_path: Optional[Path] = None  # Prevent UnboundLocalError if no local/HF checkpoint
-    
-    # Try local first
-    local_ckpt = checkpoint_manager.find_latest_checkpoint()
-    if local_ckpt and local_ckpt.exists():
-        return local_ckpt
-
-    # Try HF Hub
-    try:
-        from huggingface_hub import list_repo_files, hf_hub_download
-        hf_cfg = config.get("hf", {})
-        repo_id = hf_cfg.get("repo_id", "")
-        # If no repo_id, try to construct from username (same logic as HFUploader)
-        if not repo_id:
-            token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
-            if token:
-                from huggingface_hub import HfApi
-                api = HfApi(token=token)
-                user_info = api.whoami(token=token)
-                username = user_info.get("name") or user_info.get("user", {}).get("name")
-                if username:
-                    repo_id = f"{username}/{hf_cfg.get('repo_name', 'chess-nnue')}"
-        
-        if repo_id:
-            files = list_repo_files(repo_id=repo_id, repo_type="model")
-            ckpt_files = [f for f in files if f.endswith(".pt") and "step_" in f]
-            if ckpt_files:
-                # Get latest by step number - robust parsing
-                def _step_from_filename(fname: str) -> int:
-                    try:
-                        # Expected: step_NNNNNNNN.pt
-                        base = fname.split('_')[1].split('.')[0]
-                        return int(base)
-                    except (IndexError, ValueError):
-                        return -1
-                
-                latest = max(ckpt_files, key=_step_from_filename)
-                if _step_from_filename(latest) < 0:
-                    print(f"WARNING: Could not parse step from {latest}, skipping HF resume")
-                    return None
-                ckpt_dir = config.get("checkpoint", {}).get("dir", "/kaggle/working/checkpoints")
-                print(f"Downloading checkpoint from HF: {latest}")
-                try:
-                    # hf_hub_download with local_dir stores at local_dir/<repo_id>/<filename>
-                    # Use the return value to get the actual local path
-                    downloaded_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=latest,
-                        repo_type="model",
-                        local_dir=ckpt_dir,
-                    )
-                    local_path = Path(downloaded_path)
-                except Exception as e:
-                    print(f"HF checkpoint download failed: {e}")
-                    return None
-                if not local_path.exists():
-                    # Fallback: hf_hub_download with local_dir stores at
-                    # local_dir/<repo_id>/<filename>, try that path too
-                    # Re-derive repo_id from config or auto-generate from token
-                    repo_id_fallback = hf_cfg.get("repo_id", "")
-                    if not repo_id_fallback:
-                        token = os.environ.get(hf_cfg.get("token_env", "HF_TOKEN"), "")
-                        if token:
-                            try:
-                                from huggingface_hub import HfApi
-                                api = HfApi(token=token)
-                                user_info = api.whoami(token=token)
-                                username = user_info.get("name") or user_info.get("user", {}).get("name")
-                                if username:
-                                    repo_id_fallback = f"{username}/{hf_cfg.get('repo_name', 'chess-nnue')}"
-                            except Exception:
-                                pass
-                    fallback_path = Path(ckpt_dir) / repo_id_fallback / latest if repo_id_fallback else None
-                    if fallback_path and fallback_path.exists():
-                        local_path = fallback_path
-                    else:
-                        local_path = Path(ckpt_dir) / latest
-                        if not local_path.exists():
-                            print(f"Downloaded checkpoint not found at {local_path}")
-                            return None
-                return local_path
-    except Exception as e:
-        print(f"HF checkpoint download failed: {e}")
-
-    return None
+def alias_latest(source: str | Path, latest: str | Path) -> None:
+    latest = Path(latest)
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = latest.with_suffix(latest.suffix + ".tmp")
+    shutil.copy2(source, tmp)
+    os.replace(tmp, latest)

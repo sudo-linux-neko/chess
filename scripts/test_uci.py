@@ -1,165 +1,76 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Vaibhav
 # SPDX-License-Identifier: GPL-3.0-or-later
+"""Compare nnue_core.eval_nnue with a Stockfish 16.1 parity binary.
 
+Build the parity binary with scripts/build_stockfish.sh (its `eval` forces the
+Small network). Stockfish prints ``0.01 * to_cp(v)`` with
+NormalizeToPawnValue=356, so one printed unit is 3.56 internal units.
 """
-Test UCI integration with exported .nnue net.
 
-Usage:
-    python scripts/test_uci.py --net /path/to/nn-<hash>.nnue [--stockfish /path/to/stockfish]
-"""
+from __future__ import annotations
 
 import argparse
+import re
 import subprocess
-import tempfile
-import os
 import sys
 from pathlib import Path
-import chess
-import chess.engine
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import nnue_core  # noqa: E402
+
+FENS = [
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "2r3k1/1p3ppp/pq2b3/3p4/3P4/P1N1P3/1P3PPP/2R2RK1 b - - 0 1",
+    "4k3/8/8/8/8/8/8/R3K3 b - - 0 1",
+    "8/8/8/8/8/8/8/K6k w - - 0 1",
+]
 
 
-def test_stockfish_eval(net_path: Path, stockfish_path: Path = Path("stockfish")) -> bool:
-    """Test Stockfish EvalFile with the exported net."""
-    print(f"Testing Stockfish with net: {net_path}")
-    print(f"Stockfish binary: {stockfish_path}")
+def stockfish_values(binary: str, nnue: str, fens: list[str]) -> list[float]:
+    cmds = [f"setoption name EvalFileSmall value {nnue}"]
+    for fen in fens:
+        cmds += [f"position fen {fen}", "eval"]
+    cmds.append("quit")
+    out = subprocess.run(
+        [binary], input="\n".join(cmds) + "\n", text=True, capture_output=True, check=True
+    ).stdout
+    return [float(v) for v in re.findall(r"NNUE evaluation\s+([+-]?\d+\.\d+)", out)]
 
-    if not stockfish_path.exists():
-        print(f"ERROR: Stockfish not found at {stockfish_path}")
-        print("Run: bash scripts/build_stockfish.sh")
-        return False
 
-    if not net_path.exists():
-        print(f"ERROR: Net file not found: {net_path}")
-        return False
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--nnue", required=True)
+    p.add_argument("--stockfish", default="/tmp/opencode/sf161-src/src/stockfish-small")
+    p.add_argument("--tolerance", type=float, default=4.0, help="internal units")
+    args = p.parse_args()
 
-    # Test 1: Basic UCI handshake
-    print("\n1. Testing UCI handshake...")
-    try:
-        proc = subprocess.run(
-            [str(stockfish_path)],
-            input="uci\nisready\nquit\n",
-            capture_output=True,
-            text=True,
-            timeout=10,
+    sf = stockfish_values(args.stockfish, args.nnue, FENS)
+    if len(sf) != len(FENS):
+        raise SystemExit(f"parsed {len(sf)} evaluations, expected {len(FENS)}")
+
+    bad = 0
+    for fen, sf_pawns in zip(FENS, sf):
+        feats, _, _, _ = nnue_core.fen_features(fen)
+        stm = 0 if fen.split()[1] == "w" else 1
+        ours_stm = nnue_core.eval_nnue(
+            args.nnue, np.array([feats], dtype=np.int16), np.array([stm], dtype=np.uint8)
+        )[0]
+        ours_white = ours_stm if stm == 0 else -ours_stm
+        sf_internal = sf_pawns * 356.0
+        diff = ours_white - sf_internal
+        ok = abs(diff) <= args.tolerance
+        bad += not ok
+        print(
+            f"{'ok  ' if ok else 'FAIL'} ours={ours_white:+8.1f} "
+            f"sf={sf_internal:+8.1f} diff={diff:+6.1f}  {fen}"
         )
-        if "id name Stockfish" in proc.stdout and "readyok" in proc.stdout:
-            print("   ✓ UCI handshake successful")
-        else:
-            print(f"   ✗ UCI handshake failed: {proc.stdout}")
-            return False
-    except Exception as e:
-        print(f"   ✗ UCI test error: {e}")
-        return False
-
-    # Test 2: Load net via EvalFile
-    print("\n2. Testing EvalFile option...")
-    try:
-        proc = subprocess.run(
-            [str(stockfish_path)],
-            input=f"uci\nsetoption name EvalFile value {net_path}\nisready\nquit\n",
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if "readyok" in proc.stdout:
-            print("   ✓ Net loaded successfully")
-        else:
-            print(f"   ✗ Failed to load net: {proc.stdout}")
-            return False
-    except Exception as e:
-        print(f"   ✗ EvalFile test error: {e}")
-        return False
-
-    # Test 3: Basic evaluation
-    print("\n3. Testing evaluation...")
-    try:
-        # Create a simple FEN test
-        fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        proc = subprocess.run(
-            [str(stockfish_path)],
-            input=f"uci\nsetoption name EvalFile value {net_path}\nisready\nposition fen {fen}\neval\nquit\n",
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if "Total evaluation" in proc.stdout or "Evaluation" in proc.stdout:
-            print("   ✓ Evaluation works")
-            # Extract eval
-            for line in proc.stdout.split('\n'):
-                if 'evaluation' in line.lower() or 'score' in line.lower():
-                    print(f"   {line.strip()}")
-        else:
-            print(f"   ✗ Evaluation failed: {proc.stdout}")
-            return False
-    except Exception as e:
-        print(f"   ✗ Evaluation test error: {e}")
-        return False
-
-    # Test 4: Search
-    print("\n4. Testing search...")
-    try:
-        proc = subprocess.run(
-            [str(stockfish_path)],
-            input=f"uci\nsetoption name EvalFile value {net_path}\nisready\nposition fen {fen}\ngo depth 15\nquit\n",
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if "bestmove" in proc.stdout:
-            print("   ✓ Search works")
-            for line in proc.stdout.split('\n'):
-                if 'bestmove' in line:
-                    print(f"   {line.strip()}")
-        else:
-            print(f"   ✗ Search failed: {proc.stdout}")
-            return False
-    except Exception as e:
-        print(f"   ✗ Search test error: {e}")
-        return False
-
-    return True
-
-
-def test_cutechess_match(net_path: Path, baseline_net: Path = None, stockfish_path: Path = Path("stockfish")):
-    """Run a quick cutechess-cli match vs baseline (if available)."""
-    try:
-        import cutechess
-    except ImportError:
-        print("\n5. Skipping cutechess match (not installed)")
-        print("   Install with: pip install cutechess-cli")
-        return
-
-    print("\n5. Running cutechess match...")
-    # This would require cutechess-cli installed and a baseline net
-    # Placeholder for full implementation
-    print("   Not fully implemented yet")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Test UCI integration with exported .nnue")
-    parser.add_argument("--net", required=True, type=Path, help="Path to exported .nnue file")
-    parser.add_argument("--stockfish", type=Path, default=Path("stockfish"), help="Path to Stockfish binary")
-    parser.add_argument("--baseline-net", type=Path, help="Baseline net for cutechess match")
-    parser.add_argument("--quick", action="store_true", help="Quick test only (no search)")
-
-    args = parser.parse_args()
-
-    print("=" * 60)
-    print("NNUE UCI Integration Test")
-    print("=" * 60)
-
-    success = test_stockfish_eval(args.net, args.stockfish)
-
-    if not args.quick and args.baseline_net:
-        test_cutechess_match(args.net, args.baseline_net, args.stockfish)
-
-    print("\n" + "=" * 60)
-    if success:
-        print("ALL TESTS PASSED")
-    else:
-        print("SOME TESTS FAILED")
-        sys.exit(1)
+    raise SystemExit(1 if bad else 0)
 
 
 if __name__ == "__main__":
