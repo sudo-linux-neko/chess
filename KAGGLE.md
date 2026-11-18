@@ -90,10 +90,10 @@ The trainer:
 `train.cpu_threads: 0` picks 1 Torch thread per DDP rank on 4 vCPUs, leaving
 cores for the Rust I/O/decode threads.
 
-For a clean restart, set `FRESH = True` in the self-contained cell: it deletes
+The self-contained cell defaults to `FRESH = False`, which resumes from the
+last checkpoint. For a deliberate clean restart, set `FRESH = True`: it deletes
 `/kaggle/working/chess-works/checkpoints` and sets `NNUE_NO_RESUME=1`, so the
-trainer ignores `latest.pt` on Hugging Face too. Set `FRESH = False` only when
-you want to resume from the last uploaded checkpoint.
+trainer ignores `latest.pt` on Hugging Face too.
 
 Adjust `train.batch_size` if you hit OOM. 16384 per GPU is conservative for
 `L1=128`.

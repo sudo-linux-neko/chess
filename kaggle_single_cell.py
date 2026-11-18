@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = "https://github.com/thisisforlearn/chess-works.git"
 ROOT = Path("/kaggle/working/chess-works")
-FRESH = True  # True = ignore local/HF checkpoints; set False only to resume
+FRESH = False  # False = resume latest; set True only for a deliberate clean restart
 
 
 def run(cmd, **kwargs):
