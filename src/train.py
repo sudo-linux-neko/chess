@@ -11,6 +11,7 @@ import signal
 import sys
 import time
 from collections import deque
+from datetime import timedelta
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -111,7 +112,11 @@ def setup_distributed() -> tuple[int, int, int]:
     local = int(os.environ.get("LOCAL_RANK", "0"))
     if world > 1:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend=backend, init_method="env://")
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            timeout=timedelta(minutes=60),
+        )
         if torch.cuda.is_available():
             torch.cuda.set_device(local)
     return world, rank, local
@@ -316,6 +321,10 @@ def run(config: Config, config_path: str | None = None) -> None:
         nonlocal upload_index
         states = _gather_states(stream.state_dict(), world, rank)
         if not main:
+            # Keep non-main ranks from racing into the next DDP all-reduce while
+            # rank 0 is still writing the checkpoint.
+            if world > 1:
+                dist.barrier()
             return
         now = time.monotonic()
         elapsed = now - t0
@@ -380,6 +389,8 @@ def run(config: Config, config_path: str | None = None) -> None:
             f"elapsed={format_duration(elapsed)} left={format_duration(remaining)} "
             f"upload #{upload_index}"
         )
+        if world > 1:
+            dist.barrier()
     auto_steps = config.train.max_steps <= 0
     budget_seconds = max(0.0, config.train.time_budget_hours * 3600.0)
     budget_stop = max(1.0, budget_seconds - min(60.0, budget_seconds * 0.05)) if budget_seconds else 0.0
@@ -405,16 +416,23 @@ def run(config: Config, config_path: str | None = None) -> None:
             break
         budget_hit = budget_stop > 0 and (time.monotonic() - t0) >= budget_stop
         stop_now = bool(stop["flag"] or budget_hit)
+        ckpt_now = (time.monotonic() - last_ckpt) >= config.train.checkpoint_minutes * 60.0
         if world > 1:
-            box = [stop_now if main else False]
+            # Rank 0 owns both decisions. Checking local clocks independently made
+            # one rank enter checkpoint collectives while the other was still in
+            # the DDP all-reduce, which deadlocked after ~30 minutes.
+            box = [[stop_now if main else False, ckpt_now if main else False]]
             dist.broadcast_object_list(box, src=0)
-            stop_now = bool(box[0])
+            stop_now, ckpt_now = bool(box[0][0]), bool(box[0][1])
         if stop_now:
             reason = "time_budget" if budget_hit and not stop["flag"] else "interrupted"
             if main:
                 print(f"[train] {reason}, checkpointing")
             do_checkpoint(step, best_loss, reason=reason)
             break
+        if ckpt_now:
+            do_checkpoint(step, best_loss)
+            last_ckpt = time.monotonic()
 
         accum_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
@@ -508,10 +526,6 @@ def run(config: Config, config_path: str | None = None) -> None:
             last_log = now
             if avg < best_loss:
                 best_loss = avg
-
-        if (time.monotonic() - last_ckpt) >= config.train.checkpoint_minutes * 60.0:
-            do_checkpoint(step, best_loss)
-            last_ckpt = time.monotonic()
 
     if main:
         print(f"[train] stopped at step {step}")
