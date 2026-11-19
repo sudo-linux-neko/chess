@@ -21,12 +21,11 @@ actual fun createEngine(): UciEngine {
     engine.setExecutable(true, false)
 
     val smallNet = copyAsset(context, "nnue/final.nnue", File(context.filesDir, "final.nnue"))
-    val bigNet = copyAsset(context, "nnue/big.nnue", File(context.filesDir, "big.nnue"))
 
     return JvmUciEngine(
         engineFile = engine.takeIf { it.isFile },
         smallNet = smallNet,
-        bigNet = bigNet,
+        bigNet = null,
         workDir = workDir
     )
 }

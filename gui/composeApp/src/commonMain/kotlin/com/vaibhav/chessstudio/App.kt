@@ -686,7 +686,7 @@ private fun Sidebar(
                 }
             }
             Text(
-                "The trained small net is active in simplified positions. The official big net is bundled for normal positions.",
+                "The trained small net is active in simplified positions. Stockfish's built-in big net handles normal positions.",
                 fontSize = 9.sp,
                 color = StudioMuted,
                 lineHeight = 12.sp

@@ -22,12 +22,11 @@ actual fun createEngine(): UciEngine {
     ).map(::File).firstOrNull { it.isFile }
 
     val smallNet = copyResource("/nnue/final.nnue", File(home, "final.nnue"))
-    val bigNet = copyResource("/nnue/big.nnue", File(home, "big.nnue"))
 
     return JvmUciEngine(
         engineFile = bundledEngine ?: systemEngine,
         smallNet = smallNet,
-        bigNet = bigNet,
+        bigNet = null,
         workDir = home
     )
 }

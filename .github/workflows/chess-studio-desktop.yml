@@ -50,7 +50,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Bundle Stockfish and NNUE
+      - name: Bundle Stockfish and trained NNUE
         shell: bash
         run: |
           set -euo pipefail
@@ -78,9 +78,6 @@ jobs:
           curl -fL --retry 3 --retry-delay 2 \
             -o "$RES/nnue/final.nnue" \
             "https://huggingface.co/neko-i-am-a-cat/chess-nnue/resolve/main/final.nnue"
-          curl -fL --retry 3 --retry-delay 2 \
-            -o "$RES/nnue/big.nnue" \
-            "https://tests.stockfishchess.org/api/nn/nn-baff1ede1f90.nnue"
           ls -lh "$RES/engine" "$RES/nnue"
 
       - name: Build desktop app
