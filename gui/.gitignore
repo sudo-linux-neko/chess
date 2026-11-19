@@ -1,0 +1,15 @@
+.gradle/
+build/
+**/build/
+local.properties
+.kotlin/
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+composeApp/src/desktopMain/resources/engine/
+composeApp/src/desktopMain/resources/nnue/
+composeApp/src/androidMain/assets/nnue/
+composeApp/src/androidMain/jniLibs/
+dist/
